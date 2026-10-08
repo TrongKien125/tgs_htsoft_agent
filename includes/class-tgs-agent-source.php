@@ -37,7 +37,9 @@ class TGS_Agent_Source
         $type = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
         $limit = max(1, min(1000, (int) $limit));
 
-        $where = "local_ledger_type = %d AND (is_deleted IS NULL OR is_deleted = 0)";
+        // Chỉ phiếu GỐC: loại phiếu Z (con, có local_ledger_parent_id) — Z đi kèm payload phiếu gốc.
+        $where = "local_ledger_type = %d AND (is_deleted IS NULL OR is_deleted = 0)"
+               . " AND (local_ledger_parent_id IS NULL OR local_ledger_parent_id = 0)";
         $args = array($type);
         if ($from !== '') {
             $where .= " AND created_at >= %s";
