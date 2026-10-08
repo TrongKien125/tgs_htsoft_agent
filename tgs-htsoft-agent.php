@@ -65,5 +65,10 @@ add_action('admin_post_tgs_agent_queue_order', array('TGS_Agent_Admin', 'handle_
 // Auto tạo job khi tgs_pos tạo phiếu bán (mặc định TẮT — bật bằng option 'tgs_agent_pos_auto').
 add_action('tgs_after_order_create', array('TGS_Agent_Source', 'on_order_create'), 20, 4);
 
+// Auto tạo job create_return khi tgs_pos commit phiếu hoàn THUẦN (mặc định TẮT — bật bằng
+// option 'tgs_agent_return_auto'). Bật option này cũng TỰ TẮT đường đẩy trực tiếp cho hoàn
+// thuần (xem TGS_POS_HTsoft_Invoice_Push::on_return_committed) -> không đẩy trùng.
+add_action('tgs_pos_return_committed', array('TGS_Agent_Source', 'on_return_committed'), 20, 2);
+
 // Hook WooCommerce (mặc định TẮT — bật bằng option 'tgs_agent_woo_enabled').
 TGS_Agent_Woo::init();

@@ -546,4 +546,196 @@ class TGS_Agent_Source
         }
         self::queue_by_ledger_id((int) $sale_ledger_id);
     }
+
+    /* =====================================================================
+     * PHIẾU HOÀN (type 11) -> job create_return
+     * ------------------------------------------------------------------
+     * CHỈ hoàn THUẦN đi qua queue. Hoàn KÈM ĐỔI TRẢ vẫn đi đường trực tiếp
+     * (TGS_POS_HTsoft_Invoice_Push) vì nó phải đẩy SAU phiếu bán mới rồi link
+     * đối trừ BANHOANTRADOITRU — một luồng đồng bộ, đan xen, không tách rời ra
+     * queue được mà không làm mồ côi phiếu hoàn.
+     *
+     * Khi bật option 'tgs_agent_return_auto': enqueue ở đây, đồng thời đường
+     * trực tiếp TỰ TẮT cho nhánh hoàn thuần (xem on_return_committed của
+     * class-tgs-pos-htsoft-invoice-push) -> không đẩy trùng.
+     * ================================================================== */
+
+    const RETURN_TYPE = 11; // TGS_LEDGER_TYPE_CUSTOMER_RETURN
+
+    /** Hook tgs_pos_return_committed: auto enqueue phiếu hoàn THUẦN (nếu bật). */
+    public static function on_return_committed($result, $args = array())
+    {
+        if (get_option('tgs_agent_return_auto') != 1) {
+            return;
+        }
+        if (!is_array($result)) {
+            return;
+        }
+        // Hoàn kèm đổi trả -> để đường trực tiếp lo (đẩy sau phiếu bán + đối trừ).
+        if (is_array($args) && !empty($args['is_exchange'])) {
+            return;
+        }
+        $rid = (int) ($result['return_ledger_id'] ?? 0);
+        if ($rid > 0) {
+            self::queue_return_by_ledger_id($rid);
+        }
+    }
+
+    /**
+     * Tạo job create_return từ 1 phiếu hoàn THUẦN (type 11).
+     * Trả kết quả TGS_Agent_Jobs::create() hoặc WP_Error. Idempotent theo mã phiếu.
+     */
+    public static function queue_return_by_ledger_id($return_ledger_id)
+    {
+        $ret = self::get_order($return_ledger_id);
+        if (!$ret) {
+            return new WP_Error('NOT_FOUND', 'Không tìm thấy phiếu hoàn');
+        }
+        $return_type = (int) get_option('tgs_agent_ledger_return_type', self::RETURN_TYPE);
+        if ((int) ($ret['local_ledger_type'] ?? 0) !== $return_type) {
+            return new WP_Error('NOT_RETURN',
+                'Phiếu không phải phiếu hoàn (type ' . $return_type . ').', array('status' => 422));
+        }
+        $code = (string) ($ret['local_ledger_code'] ?? '');
+        if ($code === '') {
+            return new WP_Error('NO_CODE', 'Phiếu hoàn thiếu local_ledger_code');
+        }
+
+        // GUARD CHỐNG TRÙNG: đã có mã HTsoft (đẩy trước đó, đường nào cũng vậy) ->
+        // KHÔNG queue lại, tránh tạo phiếu hoàn HTsoft trùng. Mã HTsoft của phiếu
+        // hoàn là BHTCODE, lưu trong advance_meta['htsoft'] — cùng chỗ push_return ghi.
+        $adv = json_decode((string) ($ret['local_ledger_advance_meta'] ?? ''), true);
+        if (is_array($adv) && !empty($adv['htsoft']['bhtcode']) && (($adv['htsoft']['status'] ?? '') === 'ok')) {
+            return new WP_Error('ALREADY_PUSHED',
+                'Phiếu hoàn đã có mã HTsoft (' . (string) $adv['htsoft']['bhtcode'] . ') — không queue lại.',
+                array('status' => 409));
+        }
+
+        $items   = self::get_items($return_ledger_id);
+        $payload = self::build_return_payload($ret, $items);
+
+        // BẮT BUỘC: chi nhánh (site->SRID) + nhân viên (user->NVID) + có dòng hàng.
+        if (empty($payload['srid'])) {
+            return new WP_Error('NO_BRANCH',
+                'Site chưa nối chi nhánh HTsoft (SRID) — không tạo queue hoàn. Cấu hình ở tgs-multisite-hierarchy.');
+        }
+        if (empty($payload['nvid'])) {
+            $uid = (int) ($ret['user_id'] ?? 0);
+            return new WP_Error('NO_NV',
+                'Người tạo phiếu hoàn (user #' . $uid . ') chưa nối nhân viên HTsoft (NVID) — không tạo queue.');
+        }
+        if (empty($payload['lines'])) {
+            return new WP_Error('NO_LINES', 'Phiếu hoàn không có dòng hàng hợp lệ — không tạo queue.');
+        }
+
+        return TGS_Agent_Jobs::create(array(
+            'idempotency_key' => get_current_blog_id() . ':create_return:' . $code,
+            'action'          => 'create_return',
+            'branch_code'     => (string) $payload['branch_code'],
+            'payload'         => $payload,
+            'requested_by'    => 'tgs_pos',
+        ));
+    }
+
+    /**
+     * Build payload cho job create_return từ 1 phiếu hoàn (type 11).
+     *
+     * Dùng CHUNG map_lines() với đơn bán -> AddIn đọc dòng hàng y như
+     * create_retail_invoice (KHÔNG dùng build_lines của đường connector). Các khoá
+     * hoàn riêng (bhdcode_goc, ldn_code, HTTT header, refund) khớp push_return của
+     * tgs_pos để AddIn dựng BANHOANTRA + (tuỳ chọn) BANCTHOANTRA đúng như tay.
+     */
+    public static function build_return_payload(array $ret, array $items)
+    {
+        $code = (string) ($ret['local_ledger_code'] ?? '');
+        $rid  = (int) ($ret['local_ledger_id'] ?? 0);
+
+        $srid = self::resolve_srid();
+        $nv   = self::resolve_nv($ret['user_id'] ?? 0);
+
+        // Mã hóa đơn bán GỐC (nếu phiếu bán cha đã đẩy HTsoft) -> hoàn theo phiếu;
+        // không có -> hoàn tự do (null, khớp contract create_return §9.8).
+        $bhdcode_goc = '';
+        $parent_id = (int) ($ret['local_ledger_parent_id'] ?? 0);
+        if ($parent_id > 0) {
+            $parent = self::get_order($parent_id);
+            if ($parent) {
+                $padv = json_decode((string) ($parent['local_ledger_advance_meta'] ?? ''), true);
+                if (is_array($padv) && !empty($padv['htsoft']['bhdcode'])) {
+                    $bhdcode_goc = (string) $padv['htsoft']['bhdcode'];
+                }
+            }
+        }
+
+        $person_meta = json_decode((string) ($ret['local_ledger_person_meta'] ?? ''), true);
+        if (!is_array($person_meta)) { $person_meta = array(); }
+        $khach = array(
+            'ma'      => (string) ($ret['local_ledger_person_code'] ?? ($person_meta['code'] ?? '')) ?: null,
+            'ten'     => (string) ($ret['local_ledger_person_name'] ?? ($person_meta['name'] ?? '')),
+            'di_dong' => (string) ($ret['local_ledger_person_phone'] ?? ($person_meta['phone'] ?? '')),
+        );
+
+        // Có HĐ gốc -> AddIn nạp hàng từ HĐ gốc, giaban=null để GIỮ GIÁ HTsoft
+        // (tránh lệch tròn < 1đ -> VALIDATION_ERROR, xem §9.10). Hoàn tự do -> gửi
+        // giá hoàn/ĐVT gốc GỒM THUẾ (như create_retail_invoice).
+        $lines = self::map_return_lines($items, $bhdcode_goc !== '');
+        $total = round((float) ($ret['local_ledger_total_amount'] ?? 0));
+
+        // Payload KHỚP contract create_return (§9.8). 'srid'/'nvid' là khoá NỘI BỘ
+        // (routing + guard), AddIn bỏ qua; AddIn dùng 'nv_code'.
+        $payload = array(
+            'pos_ref'     => $code,
+            'branch_code' => $srid ?: '',            // = SRID (AddIn claim đúng chi nhánh)
+            'srid'        => $srid,
+            'nvid'        => $nv['nvid'],
+            'nv_code'     => $nv['nv_code'],
+            'khach'       => $khach,                  // dùng khi KHÔNG có bhdcode_goc
+            'bhdcode_goc' => $bhdcode_goc !== '' ? $bhdcode_goc : null, // null = hoàn tự do
+            // Lý do nhập lại HTsoft (mặc định 'NTH1' — khớp push_return của tgs_pos).
+            'ly_do'       => (string) apply_filters('tgs_pos_htsoft_return_reason_code', 'NTH1'),
+            'ghi_chu'     => mb_substr((string) ($ret['local_ledger_note'] ?? ''), 0, 100),
+            'lines'       => $lines,
+            'expected'    => array('tong_tien' => $total, 'so_dong' => count($lines)),
+            // Kế toán: hoàn hàng KHÔNG chi tiền (đổi hàng) -> HTsoft giữ "còn nợ khách".
+            // false = không tạo BANCTHOANTRA. HTTT header "Công nợ" do AddIn mặc định.
+            'refund'      => false,
+            // Hoàn THUẦN -> không đối trừ (đối trừ là của luồng đổi trả, đi đường trực tiếp).
+            'doi_tru'     => array(),
+        );
+
+        /**
+         * Tinh chỉnh payload hoàn theo dữ liệu thật (giữ nơi hiểu ledger), song song
+         * với 'tgs_agent_ledger_to_payload' của đơn bán.
+         * @param array $payload  payload mặc định
+         * @param array $ret      dòng local_ledger của phiếu hoàn
+         * @param array $items    dòng local_ledger_item của phiếu hoàn
+         */
+        return apply_filters('tgs_agent_return_to_payload', $payload, $ret, $items);
+    }
+
+    /**
+     * Dòng hàng cho create_return: {mhcode, soluong, giaban} theo contract §9.8.
+     * SOLUONG theo ĐVT gốc (nhỏ nhất). giaban = giá hoàn/ĐVT gốc GỒM THUẾ, hoặc null
+     * để AddIn GIỮ giá HTsoft (khi hoàn theo HĐ gốc). Bỏ dòng thiếu sku / SL<=0.
+     *
+     * @param bool $keep_htsoft_price true -> giaban=null (có bhdcode_goc)
+     */
+    private static function map_return_lines(array $items, $keep_htsoft_price)
+    {
+        $lines = array();
+        foreach ($items as $it) {
+            $sku = trim((string) ($it['local_product_sku'] ?? ''));
+            $sl  = (float) ($it['quantity'] ?? 0);
+            if ($sku === '' || $sl <= 0) { continue; }
+            $lines[] = array(
+                'mhcode'  => $sku,
+                'soluong' => $sl,
+                'giaban'  => $keep_htsoft_price
+                    ? null
+                    : round((float) ($it['local_ledger_item_price_after_discount'] ?? 0)),
+                'ghi_chu' => (string) ($it['local_ledger_item_note'] ?? ''),
+            );
+        }
+        return $lines;
+    }
 }

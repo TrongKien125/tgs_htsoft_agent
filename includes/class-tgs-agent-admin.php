@@ -194,6 +194,7 @@ class TGS_Agent_Admin
         if (isset($_POST['tgs_agent_settings_nonce'])
             && check_admin_referer('tgs_agent_settings', 'tgs_agent_settings_nonce')) {
             update_option('tgs_agent_pos_auto', isset($_POST['pos_auto']) ? 1 : 0);
+            update_option('tgs_agent_return_auto', isset($_POST['return_auto']) ? 1 : 0);
             update_option('tgs_agent_woo_enabled', isset($_POST['woo_enabled']) ? 1 : 0);
             update_option('tgs_agent_woo_status', sanitize_text_field(wp_unslash($_POST['woo_status'] ?? 'processing')));
             update_option('tgs_agent_woo_branch', sanitize_text_field(wp_unslash($_POST['woo_branch'] ?? '')));
@@ -279,6 +280,7 @@ class TGS_Agent_Admin
         $woo_nv_code = get_option('tgs_agent_woo_nv_code', '');
 
         $pos_auto = get_option('tgs_agent_pos_auto') == 1;
+        $return_auto = get_option('tgs_agent_return_auto') == 1;
 
         echo '<h2 style="margin-top:24px;">Cấu hình tạo job</h2>';
         echo '<form method="post">';
@@ -287,6 +289,10 @@ class TGS_Agent_Admin
         echo '<tr><th>Auto tạo job khi tgs_pos tạo phiếu bán</th><td><label><input type="checkbox" name="pos_auto" value="1" '
             . checked($pos_auto, true, false) . '> Bật (hook <code>tgs_after_order_create</code>)</label>'
             . ' <span class="description">Tắt → chỉ tạo thủ công ở "Danh sách đơn".</span></td></tr>';
+        echo '<tr><th>Auto tạo job khi tgs_pos hoàn hàng (hoàn thuần)</th><td><label><input type="checkbox" name="return_auto" value="1" '
+            . checked($return_auto, true, false) . '> Bật (hook <code>tgs_pos_return_committed</code>, action <code>create_return</code>)</label>'
+            . ' <span class="description">Chỉ hoàn THUẦN đi qua queue; hoàn kèm đổi trả vẫn đẩy trực tiếp. '
+            . 'Bật cái này sẽ TẮT đường đẩy trực tiếp cho hoàn thuần (không đẩy trùng) — chỉ bật khi AddIn đã xử lý được <code>create_return</code>.</span></td></tr>';
         echo '<tr><th>Bật tạo job từ Woo</th><td><label><input type="checkbox" name="woo_enabled" value="1" '
             . checked($woo_enabled, true, false) . '> Bật</label></td></tr>';
         echo '<tr><th>Trạng thái đơn kích hoạt</th><td><input type="text" name="woo_status" value="'
