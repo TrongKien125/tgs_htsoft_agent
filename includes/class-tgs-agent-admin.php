@@ -34,11 +34,27 @@ class TGS_Agent_Admin
                 . ' is-dismissible"><p>' . esc_html($q) . '</p></div>';
         }
 
-        $orders = TGS_Agent_Source::recent_sale_orders(100);
+        $today = current_time('Y-m-d');
+        $from = isset($_GET['from']) ? sanitize_text_field(wp_unslash($_GET['from'])) : $today;
+        $to   = isset($_GET['to']) ? sanitize_text_field(wp_unslash($_GET['to'])) : $today;
+        // Chuẩn hoá: nếu sai định dạng thì về hôm nay.
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) { $from = $today; }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) { $to = $today; }
+
+        $orders = TGS_Agent_Source::recent_sale_orders(1000, $from, $to);
         $auto = get_option('tgs_agent_pos_auto') == 1;
         $site_srid = TGS_Agent_Source::resolve_srid();
 
         echo '<div class="wrap"><h1>Danh sách đơn (tgs_pos) → queue</h1>';
+
+        // Bộ lọc ngày (mặc định hôm nay → hôm nay)
+        echo '<form method="get" style="margin:8px 0;">';
+        echo '<input type="hidden" name="page" value="tgs-htsoft-agent-orders">';
+        echo 'Từ ngày <input type="date" name="from" value="' . esc_attr($from) . '"> ';
+        echo 'đến <input type="date" name="to" value="' . esc_attr($to) . '"> ';
+        echo '<button class="button">Lọc</button> ';
+        echo '<a class="button" href="' . esc_url(admin_url('admin.php?page=tgs-htsoft-agent-orders&from=' . $today . '&to=' . $today)) . '">Hôm nay</a>';
+        echo '</form>';
         echo '<p>Tự động tạo job khi có đơn mới: <strong>' . ($auto ? 'BẬT' : 'TẮT')
             . '</strong> (đổi ở <a href="' . esc_url(admin_url('admin.php?page=tgs-htsoft-agent-sync')) . '">Quản lý đồng bộ</a>).</p>';
         if (!$site_srid) {

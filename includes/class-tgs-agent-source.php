@@ -27,15 +27,30 @@ class TGS_Agent_Source
     }
 
     /** Danh sách phiếu bán gần nhất (type 10). */
-    public static function recent_sale_orders($limit = 100)
+    /**
+     * Phiếu bán (type 10), lọc theo khoảng NGÀY (created_at). $from/$to dạng 'Y-m-d' (rỗng = bỏ lọc đầu đó).
+     */
+    public static function recent_sale_orders($limit = 500, $from = '', $to = '')
     {
         global $wpdb;
         $t = self::ledger_table();
         $type = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
-        $limit = max(1, min(500, (int) $limit));
+        $limit = max(1, min(1000, (int) $limit));
+
+        $where = "local_ledger_type = %d AND (is_deleted IS NULL OR is_deleted = 0)";
+        $args = array($type);
+        if ($from !== '') {
+            $where .= " AND created_at >= %s";
+            $args[] = $from . ' 00:00:00';
+        }
+        if ($to !== '') {
+            $where .= " AND created_at <= %s";
+            $args[] = $to . ' 23:59:59';
+        }
+        $args[] = $limit;
+
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM $t WHERE local_ledger_type = %d AND (is_deleted IS NULL OR is_deleted = 0)
-             ORDER BY local_ledger_id DESC LIMIT %d", $type, $limit
+            "SELECT * FROM $t WHERE $where ORDER BY local_ledger_id DESC LIMIT %d", $args
         ), ARRAY_A);
         return is_array($rows) ? $rows : array();
     }
@@ -309,13 +324,24 @@ class TGS_Agent_Source
 
         $payments = array();
         foreach ($receipts as $r) {
-            // DÒNG ĐỐI TRỪ (đổi trả) KHÔNG phải tiền thật — đối trừ ở sổ công nợ, không lập phiếu thu.
-            // Bỏ qua như tgs_pos payments_of(). Chỉ các khoản khách TRẢ THẬT (tiền mặt/QR…) mới đẩy.
-            if (!empty($r['offset_netting'])) { continue; }
             $amt = round((float) ($r['amount'] ?? 0));
             if ($amt <= 0) { continue; }
             $method = strtolower(trim((string) ($r['method'] ?? '')));
             $label  = (string) ($r['label'] ?? '');
+            // DÒNG ĐỐI TRỪ (đổi trả): CHUYỀN QUA như hình thức "Đối trừ công nợ" (key 'doi_tru')
+            // để tổng payments khớp tổng hóa đơn (940k tiền mặt + 450k đối trừ = tổng). AddIn map
+            // 'doi_tru' → HTTT "Đối trừ công nợ" qua PaymentMap.
+            if (!empty($r['offset_netting']) || $method === 'doi_tru') {
+                $payments[] = array(
+                    'hinh_thuc'  => 'doi_tru',
+                    'amount'     => $amt,
+                    'label'      => $label !== '' ? $label : 'Đối trừ công nợ',
+                    'ghi_chu'    => (string) ($r['note'] ?? ''),
+                    'offset'     => 1,                                               // đánh dấu đối trừ (không phải tiền mặt vào quỹ)
+                    'offset_return_ledger_id' => (int) ($r['offset_return_ledger_id'] ?? 0),
+                );
+                continue;
+            }
             $is_cash = $method === 'cash' || $method === '' || mb_stripos($label, 'tiền mặt') !== false || mb_stripos($label, 'tien mat') !== false;
             $payments[] = array(
                 'hinh_thuc' => $is_cash ? 'tien_mat' : (string) ($r['method'] ?? ''), // key POS → AddIn PaymentMap
