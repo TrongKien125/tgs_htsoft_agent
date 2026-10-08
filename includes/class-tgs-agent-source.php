@@ -231,6 +231,46 @@ class TGS_Agent_Source
         ));
     }
 
+    /**
+     * AddIn tạo HĐ thành công → GHI ĐÈ local_ledger_code = mã HTsoft (BHDCODE), swap trong title.
+     * (Giống reconcile_local_codes của tgs_pos, bước phiếu CHÍNH.) Phần phiếu con/thu (Z, BPTTCODE)
+     * để tgs_pos tự reconcile qua action 'tgs_agent_invoice_reconciled'.
+     * Trả true nếu đã override.
+     */
+    public static function apply_htsoft_code($pos_ref, $bhdcode, array $result = array())
+    {
+        $pos_ref = trim((string) $pos_ref);
+        $bhdcode = trim((string) $bhdcode);
+        if ($pos_ref === '' || $bhdcode === '' || $bhdcode === $pos_ref) {
+            return false;
+        }
+        global $wpdb;
+        $lt = self::ledger_table();
+        $type = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT local_ledger_id, local_ledger_code, local_ledger_title FROM $lt
+             WHERE local_ledger_code = %s AND local_ledger_type = %d
+               AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+            $pos_ref, $type
+        ));
+        if (!$row) {
+            return false; // mã đã bị đè trước đó / không tìm thấy
+        }
+
+        $title = (string) $row->local_ledger_title;
+        $new_title = $title !== '' ? str_replace($pos_ref, $bhdcode, $title) : $title;
+        $wpdb->update($lt, array(
+            'local_ledger_code'  => $bhdcode,
+            'local_ledger_title' => $new_title,
+            'updated_at'         => current_time('mysql'),
+        ), array('local_ledger_id' => (int) $row->local_ledger_id));
+
+        // Cho tgs_pos reconcile phần còn lại (bill Z, phiếu thu BPTTCODE) nếu muốn.
+        do_action('tgs_agent_invoice_reconciled', (int) $row->local_ledger_id, $bhdcode, $result, $pos_ref);
+        return true;
+    }
+
     /** Hook tgs_after_order_create: auto tạo job nếu bật. */
     public static function on_order_create($sale_ledger_id, $order_data = null, $products_data = null, $metas = null)
     {

@@ -152,15 +152,22 @@ class TGS_Agent_Jobs
         }
 
         $now = current_time('mysql', true);
+        $bhdcode = isset($result['bhdcode']) ? trim((string) $result['bhdcode']) : '';
         $wpdb->update($table, array(
             'status'        => $status,
             'bhdid'         => isset($result['bhdid']) ? (string) $result['bhdid'] : null,
-            'bhdcode'       => isset($result['bhdcode']) ? (string) $result['bhdcode'] : null,
+            'bhdcode'       => $bhdcode !== '' ? $bhdcode : null,
             'error_code'    => isset($result['error']) ? (string) $result['error'] : null,
             'error_message' => isset($result['info']) ? (string) $result['info'] : null,
             'result_json'   => wp_json_encode($result),
             'updated_at'    => $now,
         ), array('job_id' => $job_id));
+
+        // Tạo HĐ thành công → GHI ĐÈ mã phiếu POS = mã HTsoft (reconcile).
+        if ($status === 'completed' && $bhdcode !== '' && !empty($job->business_code)
+            && class_exists('TGS_Agent_Source')) {
+            TGS_Agent_Source::apply_htsoft_code((string) $job->business_code, $bhdcode, $result);
+        }
 
         return array('ok' => true, 'status' => $status);
     }
