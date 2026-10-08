@@ -44,11 +44,30 @@ class TGS_Agent_REST
 
     public static function ping(WP_REST_Request $req)
     {
+        self::touch_agent('ping', null);
         return new WP_REST_Response(array(
             'ok'          => true,
             'server_time' => gmdate('c'),
             'client_id'   => TGS_Agent_Auth::$current['client_id'],
         ), 200);
+    }
+
+    /** Ghi nhận agent hoạt động (phục vụ màn quản lý đồng bộ). */
+    private static function touch_agent($event, $branch)
+    {
+        $cid = TGS_Agent_Auth::$current['client_id'];
+        $agents = get_option('tgs_agent_agents', array());
+        if (!is_array($agents)) {
+            $agents = array();
+        }
+        $prev = isset($agents[$cid]) && is_array($agents[$cid]) ? $agents[$cid] : array();
+        $agents[$cid] = array(
+            'last_seen'  => gmdate('Y-m-d H:i:s'),
+            'last_event' => $event,
+            'branch'     => $branch !== null ? $branch : (isset($prev['branch']) ? $prev['branch'] : ''),
+            'ip'         => isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '',
+        );
+        update_option('tgs_agent_agents', $agents, false);
     }
 
     public static function claim(WP_REST_Request $req)
@@ -61,6 +80,7 @@ class TGS_Agent_REST
         if (!TGS_Agent_Config::client_allows_branch(TGS_Agent_Auth::$current, $branch)) {
             return self::err('BRANCH_FORBIDDEN', 'Client không được phép chi nhánh này', 403);
         }
+        self::touch_agent('claim', $branch);
         $row = TGS_Agent_Jobs::claim_next($branch);
         if (!$row) {
             return new WP_REST_Response(new stdClass(), 200); // {} = không có việc

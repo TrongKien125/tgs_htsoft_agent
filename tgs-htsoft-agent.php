@@ -32,6 +32,7 @@ require_once TGS_AGENT_DIR . 'includes/class-tgs-agent-config.php';
 require_once TGS_AGENT_DIR . 'includes/class-tgs-agent-db.php';
 require_once TGS_AGENT_DIR . 'includes/class-tgs-agent-auth.php';
 require_once TGS_AGENT_DIR . 'includes/class-tgs-agent-jobs.php';
+require_once TGS_AGENT_DIR . 'includes/class-tgs-agent-source.php';
 require_once TGS_AGENT_DIR . 'includes/rest/class-tgs-agent-rest.php';
 require_once TGS_AGENT_DIR . 'includes/class-tgs-agent-admin.php';
 require_once TGS_AGENT_DIR . 'includes/class-tgs-agent-woo.php';
@@ -45,6 +46,10 @@ add_action('rest_api_init', array('TGS_Agent_REST', 'register_routes'));
 // Trang quản trị.
 add_action('admin_menu', array('TGS_Agent_Admin', 'register_menu'));
 add_action('admin_post_tgs_agent_requeue', array('TGS_Agent_Admin', 'handle_requeue'));
+add_action('admin_post_tgs_agent_queue_order', array('TGS_Agent_Admin', 'handle_queue_order'));
+
+// Auto tạo job khi tgs_pos tạo phiếu bán (mặc định TẮT — bật bằng option 'tgs_agent_pos_auto').
+add_action('tgs_after_order_create', array('TGS_Agent_Source', 'on_order_create'), 20, 4);
 
 // Hook WooCommerce (mặc định TẮT — bật bằng option 'tgs_agent_woo_enabled').
 TGS_Agent_Woo::init();

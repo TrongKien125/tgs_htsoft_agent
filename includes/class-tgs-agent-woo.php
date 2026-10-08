@@ -34,7 +34,12 @@ class TGS_Agent_Woo
             return;
         }
 
-        $branch = (string) get_option('tgs_agent_woo_branch', '');
+        // BẮT BUỘC: chi nhánh (site→SRID) + nhân viên (user→NVID). Thiếu → KHÔNG tạo job.
+        $srid = class_exists('TGS_Agent_Source') ? TGS_Agent_Source::resolve_srid() : null;
+        if (!$srid) { return; }
+        $nv = TGS_Agent_Source::resolve_nv($order->get_user_id());
+        if (empty($nv['nvid'])) { return; }
+        $branch = $srid;
         $mh_meta = (string) get_option('tgs_agent_woo_mh_meta', '_htsoft_mhcode');
 
         $lines = array();
@@ -70,6 +75,9 @@ class TGS_Agent_Woo
                 'dia_chi' => $order->get_billing_address_1(),
                 'email'   => $order->get_billing_email(),
             ),
+            'srid'        => $srid,
+            'nvid'        => $nv['nvid'],
+            'nv_code'     => $nv['nv_code'],
             'ly_do_xuat'  => 'XBA',
             'nguon_ban'   => 'Gần shop',
             'ghi_chu'     => 'Woo #' . $order_id,
