@@ -309,6 +309,9 @@ class TGS_Agent_Source
 
         $payments = array();
         foreach ($receipts as $r) {
+            // DÒNG ĐỐI TRỪ (đổi trả) KHÔNG phải tiền thật — đối trừ ở sổ công nợ, không lập phiếu thu.
+            // Bỏ qua như tgs_pos payments_of(). Chỉ các khoản khách TRẢ THẬT (tiền mặt/QR…) mới đẩy.
+            if (!empty($r['offset_netting'])) { continue; }
             $amt = round((float) ($r['amount'] ?? 0));
             if ($amt <= 0) { continue; }
             $method = strtolower(trim((string) ($r['method'] ?? '')));
