@@ -563,6 +563,11 @@ class TGS_Agent_Source
         if (get_option('tgs_agent_pos_auto') != 1) {
             return;
         }
+        // MỐC CẮT: auto chỉ tạo job cho đơn phát sinh TỪ THỜI ĐIỂM BẬT trở đi.
+        // Đơn trước mốc (đã bị bỏ qua) -> KHÔNG tự quét, xử lý bằng nút "Tạo job" tay.
+        if (!get_option('tgs_agent_pos_auto_since')) {
+            update_option('tgs_agent_pos_auto_since', current_time('mysql'));
+        }
         if (!wp_next_scheduled('tgs_agent_enqueue_sweep')) {
             wp_schedule_event(time() + 60, 'tgs_agent_5min', 'tgs_agent_enqueue_sweep');
         }
@@ -574,7 +579,9 @@ class TGS_Agent_Source
      * Điều kiện (khớp vat_htsoft_candidates của tgs_pos cho nhánh 'sale'):
      *   • phiếu bán POS (type 10, source POS), phiếu GỐC (không phải Z con),
      *   • hóa đơn eVAT mới nhất của đơn invoice_state = 'done' (ĐÃ phát hành),
-     *   • chưa có mã HTsoft (advance_meta.htsoft.status != ok).
+     *   • chưa có mã HTsoft (advance_meta.htsoft.status != ok),
+     *   • created_at >= MỐC BẬT auto (tgs_agent_pos_auto_since) — KHÔNG quét ngược
+     *     đơn cũ trước mốc; đơn cũ xử lý bằng nút "Tạo job" tay.
      * queue_by_ledger_id() tự idempotent + guard "đã đẩy" nên gọi lặp an toàn.
      *
      * @return int số job vừa enqueue
@@ -582,6 +589,13 @@ class TGS_Agent_Source
     public static function sweep_evat_ready_orders($limit = 50)
     {
         if (get_option('tgs_agent_pos_auto') != 1) {
+            return 0;
+        }
+        // Mốc cắt: chưa có thì set NGAY BÂY GIỜ và thoát — mọi đơn trước mốc là "đơn cũ",
+        // không tự tạo job (tránh ồ ạt enqueue lịch sử khi vừa bật auto).
+        $since = (string) get_option('tgs_agent_pos_auto_since', '');
+        if ($since === '') {
+            update_option('tgs_agent_pos_auto_since', current_time('mysql'));
             return 0;
         }
         global $wpdb;
@@ -592,8 +606,8 @@ class TGS_Agent_Source
         }
         $sale_type  = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
         $source_pos = defined('TGS_LEDGER_SOURCE_POS') ? (int) TGS_LEDGER_SOURCE_POS : 1;
-        // Chỉ quét đơn gần đây để nhẹ: eVAT phát hành muộn vài phút tới vài ngày.
-        $from  = gmdate('Y-m-d H:i:s', current_time('timestamp') - 7 * DAY_IN_SECONDS);
+        // CHỈ quét đơn phát sinh TỪ MỐC BẬT auto trở đi (không quét ngược lịch sử).
+        $from  = $since;
         $limit = max(1, min(200, (int) $limit));
 
         $rows = $wpdb->get_results($wpdb->prepare(
