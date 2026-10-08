@@ -193,14 +193,7 @@ class TGS_Agent_Admin
         // Lưu cấu hình Woo.
         if (isset($_POST['tgs_agent_settings_nonce'])
             && check_admin_referer('tgs_agent_settings', 'tgs_agent_settings_nonce')) {
-            // Bật auto tạo job: ĐẶT LẠI mốc cắt = NGAY BÂY GIỜ (0->1). Từ mốc này về
-            // sau mới tự tạo job; đơn cũ trước mốc xử lý bằng nút "Tạo job" tay.
-            $pos_auto_prev = (int) get_option('tgs_agent_pos_auto');
-            $pos_auto_now  = isset($_POST['pos_auto']) ? 1 : 0;
-            update_option('tgs_agent_pos_auto', $pos_auto_now);
-            if ($pos_auto_now === 1 && $pos_auto_prev !== 1) {
-                update_option('tgs_agent_pos_auto_since', current_time('mysql'));
-            }
+            update_option('tgs_agent_pos_auto', isset($_POST['pos_auto']) ? 1 : 0);
             update_option('tgs_agent_return_auto', isset($_POST['return_auto']) ? 1 : 0);
             update_option('tgs_agent_woo_enabled', isset($_POST['woo_enabled']) ? 1 : 0);
             update_option('tgs_agent_woo_status', sanitize_text_field(wp_unslash($_POST['woo_status'] ?? 'processing')));
