@@ -165,13 +165,27 @@ class TGS_Agent_Jobs
             'updated_at'    => $now,
         ), array('job_id' => $job_id));
 
-        // Tạo HĐ thành công → GHI ĐÈ mã phiếu POS = mã HTsoft (reconcile).
-        if ($status === 'completed' && $bhdcode !== '' && !empty($job->business_code)
+        // Tạo HĐ thành công → LƯU MAPPING mã POS ↔ mã HTsoft vào meta (KHÔNG override mã phiếu).
+        $reconciled = false;
+        $pos_ref = self::job_pos_ref($job);
+        if ($status === 'completed' && $bhdcode !== '' && $pos_ref !== ''
             && class_exists('TGS_Agent_Source')) {
-            TGS_Agent_Source::apply_htsoft_code((string) $job->business_code, $bhdcode, $result);
+            $reconciled = (bool) TGS_Agent_Source::save_htsoft_mapping($pos_ref, $bhdcode, $result);
         }
 
-        return array('ok' => true, 'status' => $status);
+        // Trả rõ kết quả mapping để AddIn trace được vì sao đổi/không đổi (đề xuất của AddIn).
+        return array('ok' => true, 'status' => $status, 'reconciled' => $reconciled, 'pos_ref' => $pos_ref);
+    }
+
+    /** pos_ref của job: ưu tiên payload.pos_ref; fallback tách từ idempotency_key (blog:action:pos_ref). */
+    private static function job_pos_ref($job)
+    {
+        $payload = json_decode((string) $job->payload_json, true);
+        if (is_array($payload) && !empty($payload['pos_ref'])) {
+            return trim((string) $payload['pos_ref']);
+        }
+        $parts = explode(':', (string) $job->idempotency_key);
+        return count($parts) >= 3 ? trim((string) end($parts)) : '';
     }
 
     /** Đưa job failed/cancelled về queued để chạy lại (chỉ dùng từ admin). */

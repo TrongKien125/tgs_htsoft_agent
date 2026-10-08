@@ -151,6 +151,124 @@ class TGS_Agent_Source
         return $out;
     }
 
+    /**
+     * Hóa đơn eVAT đã phát hành của phiếu (nếu có) → khối cho AddIn điền TAB THUẾ bên HTsoft.
+     * Nguồn: bảng local_viettel_invoice, đúng như push_invoice_vat của tgs_pos.
+     * Chỉ trả khi đã phát hành ('done') và có số hóa đơn; chưa lập → null (HTsoft để "chưa lập VAT").
+     *   seri       → Ký hiệu HĐ · mau_so → Mẫu số HĐ · so_hoa_don → Số hóa đơn
+     *   ngay_hd, tile_thue, thue (tổng tiền thuế)
+     */
+    public static function vat_invoice_of($sale_ledger_id)
+    {
+        global $wpdb;
+        $vi = $wpdb->prefix . 'local_viettel_invoice';
+        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $vi)) !== $vi) {
+            return null;
+        }
+        $v = $wpdb->get_row($wpdb->prepare(
+            "SELECT invoice_state, invoice_series, template_code, viettel_invoice_no,
+                    total_before_tax, total_tax_amount, issue_sent_at
+               FROM $vi WHERE sale_ledger_id = %d
+              ORDER BY local_viettel_invoice_id DESC LIMIT 1",
+            (int) $sale_ledger_id
+        ), ARRAY_A);
+        if (!$v || ($v['invoice_state'] ?? '') !== 'done') {
+            return null;
+        }
+        $series = trim((string) $v['invoice_series']);
+        $no     = trim((string) $v['viettel_invoice_no']);
+        if ($no === '') {
+            return null; // đã 'done' mà chưa có số → chưa đủ để điền tab thuế
+        }
+        // SoHD = seri + số (nếu số chưa gồm seri), giống push_invoice_vat.
+        $so_hd  = ($series !== '' && stripos($no, $series) !== 0) ? ($series . $no) : $no;
+        $pretax = (float) $v['total_before_tax'];
+        $thue   = (float) $v['total_tax_amount'];
+        $tile   = $pretax > 0 ? round($thue / $pretax * 100, 2) : 0;
+        return array(
+            'seri'       => $series,                            // → Ký hiệu HĐ
+            'mau_so'     => trim((string) $v['template_code']), // → Mẫu số HĐ
+            'so_hoa_don' => $so_hd,                             // → Số hóa đơn
+            'ngay_hd'    => substr((string) ($v['issue_sent_at'] ?: ''), 0, 19),
+            'tile_thue'  => $tile,                              // % thuế đại diện của hóa đơn
+            'thue'       => round($thue),                       // tổng tiền thuế
+        );
+    }
+
+    /** Map dòng local_ledger_item → lines[] payload §3 (dùng chung cho đơn chính và phiếu Z). */
+    private static function map_lines(array $items)
+    {
+        $lines = array();
+        foreach ($items as $it) {
+            $sku = (string) ($it['local_product_sku'] ?? '');
+            if ($sku === '') { continue; }
+            $lines[] = array(
+                'mhcode'      => $sku,
+                'mhid'        => null,
+                'kho_code'    => null,
+                'soluong'     => (float) ($it['quantity'] ?? 0),                 // ĐVT nhỏ nhất
+                'giaban'      => round((float) ($it['local_ledger_item_price_after_discount'] ?? 0)),
+                'chietkhau'   => round((float) ($it['local_ledger_item_discount_amount'] ?? 0)),
+                'thue_suat'   => (float) ($it['local_ledger_item_tax_percent'] ?? 0),          // % thuế suất của dòng
+                'tien_thue'   => round((float) ($it['local_ledger_item_tax_amount'] ?? 0)),    // tiền thuế dòng (sau CK)
+                'unit_name'   => (string) ($it['local_ledger_item_unit_name'] ?? ''),
+                'qty_rate'    => (float) ($it['local_ledger_item_unit_ratio'] ?? 1),
+                'soluong_ex'  => (float) ($it['local_ledger_item_unit_quantity'] ?? 0),
+                'ghi_chu'     => (string) ($it['local_ledger_item_note'] ?? ''),
+                'imei'        => array(),
+                'is_gift'     => (int) ($it['local_ledger_item_gift_type'] ?? 0),
+            );
+        }
+        return $lines;
+    }
+
+    /** Phiếu bán là PHIẾU Z? (parent type 10 và code = <mã gốc>+'Z') — khớp is_bill_z của tgs_pos. */
+    public static function is_bill_z_ledger($ledger_id)
+    {
+        global $wpdb;
+        $t = self::ledger_table();
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT local_ledger_parent_id, local_ledger_code FROM $t WHERE local_ledger_id = %d", (int) $ledger_id
+        ), ARRAY_A);
+        if (!$row) { return false; }
+        $pid = (int) ($row['local_ledger_parent_id'] ?? 0);
+        if ($pid <= 0) { return false; }
+        $sale_type = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
+        $parent = $wpdb->get_row($wpdb->prepare(
+            "SELECT local_ledger_type, local_ledger_code FROM $t WHERE local_ledger_id = %d", $pid
+        ), ARRAY_A);
+        if (!$parent || (int) $parent['local_ledger_type'] !== $sale_type) { return false; }
+        return strcasecmp(trim((string) $row['local_ledger_code']),
+                          trim((string) $parent['local_ledger_code']) . 'Z') === 0;
+    }
+
+    /**
+     * Phiếu Z đi kèm đơn bán (nếu có) → khối cho AddIn tạo HÓA ĐƠN THỨ HAI (mã = <mã chính>+'Z').
+     * Z = type 10 con của đơn, có phiếu xuất riêng chứa dòng hàng (thường là hàng KM/tặng, giá 0).
+     * Z nội bộ, KHÔNG khai thuế → không có khối vat. Không có Z → null.
+     */
+    public static function bill_z_of($sale_ledger_id)
+    {
+        global $wpdb;
+        $t = self::ledger_table();
+        $sale_type = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
+        $z_id = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT local_ledger_id FROM $t
+             WHERE local_ledger_parent_id = %d AND local_ledger_type = %d
+               AND (is_deleted IS NULL OR is_deleted = 0)
+             ORDER BY local_ledger_id ASC LIMIT 1",
+            (int) $sale_ledger_id, $sale_type
+        ));
+        if ($z_id <= 0) { return null; }
+        $z_lines = self::map_lines(self::get_items($z_id));
+        if (empty($z_lines)) { return null; }
+        return array(
+            'lines'   => $z_lines,
+            'ghi_chu' => 'Phiếu tách hàng khuyến mãi (mã Z)',
+            'so_dong' => count($z_lines),
+        );
+    }
+
     /** Build payload §3 từ 1 phiếu bán. */
     public static function build_payload(array $order, array $items)
     {
@@ -174,25 +292,7 @@ class TGS_Agent_Source
             'email'   => (string) ($order['local_ledger_person_email'] ?? ($person_meta['email'] ?? '')),
         );
 
-        $lines = array();
-        foreach ($items as $it) {
-            $sku = (string) ($it['local_product_sku'] ?? '');
-            if ($sku === '') { continue; }
-            $lines[] = array(
-                'mhcode'      => $sku,
-                'mhid'        => null,
-                'kho_code'    => null,
-                'soluong'     => (float) ($it['quantity'] ?? 0),                 // ĐVT nhỏ nhất
-                'giaban'      => round((float) ($it['local_ledger_item_price_after_discount'] ?? 0)),
-                'chietkhau'   => round((float) ($it['local_ledger_item_discount_amount'] ?? 0)),
-                'unit_name'   => (string) ($it['local_ledger_item_unit_name'] ?? ''),
-                'qty_rate'    => (float) ($it['local_ledger_item_unit_ratio'] ?? 1),
-                'soluong_ex'  => (float) ($it['local_ledger_item_unit_quantity'] ?? 0),
-                'ghi_chu'     => (string) ($it['local_ledger_item_note'] ?? ''),
-                'imei'        => array(),
-                'is_gift'     => (int) ($it['local_ledger_item_gift_type'] ?? 0),
-            );
-        }
+        $lines = self::map_lines($items);
 
         // NGUỒN BÁN: tên thật nằm trong advance_meta (khoá pos_sale_source), KHÔNG phải
         // cột local_ledger_source (là ID, vd "1" — HTsoft không hiểu, gây lỗi lưu).
@@ -221,6 +321,10 @@ class TGS_Agent_Source
             'ghi_chu'     => (string) ($order['local_ledger_note'] ?? ($order['local_ledger_title'] ?? '')),
             'lines'       => $lines,
             'payments'    => array(array('hinh_thuc' => 'tien_mat', 'amount' => $total)),
+            // Khối hóa đơn VAT (seri/mẫu số/số HĐ/thuế) để AddIn điền TAB THUẾ — null nếu chưa lập eVAT.
+            'vat'         => self::vat_invoice_of((int) ($order['local_ledger_id'] ?? 0)),
+            // Phiếu Z đi kèm: AddIn tạo HÓA ĐƠN THỨ HAI mã = <mã chính>+'Z' sau khi có mã chính. null nếu không tách.
+            'bill_z'      => self::bill_z_of((int) ($order['local_ledger_id'] ?? 0)),
             'expected'    => array('tong_tien' => $total, 'so_dong' => count($lines)),
         );
 
@@ -243,6 +347,20 @@ class TGS_Agent_Source
         $code = (string) ($order['local_ledger_code'] ?? '');
         if ($code === '') {
             return new WP_Error('NO_CODE', 'Phiếu thiếu local_ledger_code');
+        }
+        // Phiếu Z KHÔNG queue riêng: nó đi kèm payload của phiếu gốc (AddIn tạo hóa đơn thứ hai mã +'Z').
+        if (self::is_bill_z_ledger($ledger_id)) {
+            return new WP_Error('IS_BILL_Z',
+                'Đây là phiếu Z (mã …Z) — hãy queue phiếu gốc, phiếu Z sẽ đi kèm tự động.',
+                array('status' => 422));
+        }
+        // Đã có mã HTsoft (đẩy trước đó) → KHÔNG queue lại, tránh tạo hóa đơn TRÙNG.
+        // Vì mã POS giữ nguyên `BT…` (không override), nhận diện qua meta mapping.
+        $adv = json_decode((string) ($order['local_ledger_advance_meta'] ?? ''), true);
+        if (is_array($adv) && !empty($adv['htsoft']['bhdcode']) && (($adv['htsoft']['status'] ?? '') === 'ok')) {
+            return new WP_Error('ALREADY_PUSHED',
+                'Phiếu đã có mã HTsoft (' . (string) $adv['htsoft']['bhdcode'] . ') — không queue lại.',
+                array('status' => 409));
         }
         $items = self::get_items($ledger_id);
         $payload = self::build_payload($order, $items);
@@ -270,41 +388,63 @@ class TGS_Agent_Source
     }
 
     /**
-     * AddIn tạo HĐ thành công → GHI ĐÈ local_ledger_code = mã HTsoft (BHDCODE), swap trong title.
-     * (Giống reconcile_local_codes của tgs_pos, bước phiếu CHÍNH.) Phần phiếu con/thu (Z, BPTTCODE)
-     * để tgs_pos tự reconcile qua action 'tgs_agent_invoice_reconciled'.
-     * Trả true nếu đã override.
+     * AddIn tạo HĐ thành công → LƯU MAPPING mã POS ↔ mã HTsoft vào META, **KHÔNG override**
+     * local_ledger_code (phiếu giữ nguyên mã POS `BT…`). Ghi vào `local_ledger_advance_meta['htsoft']`
+     * — cùng chỗ tgs_pos dùng (push_order/VAT/offset đọc được, và chặn đẩy trùng qua đường SQL).
+     * Lưu: bhdcode, bhdid, pos_ref (2 chiều), receipts (BPTTCODE), bhdcode_z, status='ok', via='addin'.
+     * Idempotent: gọi lại chỉ cập nhật. Trả true nếu đã lưu.
      */
-    public static function apply_htsoft_code($pos_ref, $bhdcode, array $result = array())
+    public static function save_htsoft_mapping($pos_ref, $bhdcode, array $result = array())
     {
         $pos_ref = trim((string) $pos_ref);
         $bhdcode = trim((string) $bhdcode);
-        if ($pos_ref === '' || $bhdcode === '' || $bhdcode === $pos_ref) {
+        if ($pos_ref === '' || $bhdcode === '') {
             return false;
         }
         global $wpdb;
         $lt = self::ledger_table();
         $type = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
+        if (!$wpdb->get_var("SHOW COLUMNS FROM `$lt` LIKE 'local_ledger_advance_meta'")) {
+            return false; // site chưa có cột meta — không lưu được mapping
+        }
 
+        // Tìm phiếu theo mã POS; nếu đã lưu trước đó (mã POS giữ nguyên) vẫn tìm thấy.
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT local_ledger_id, local_ledger_code, local_ledger_title FROM $lt
+            "SELECT local_ledger_id, local_ledger_advance_meta FROM $lt
              WHERE local_ledger_code = %s AND local_ledger_type = %d
                AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
             $pos_ref, $type
         ));
         if (!$row) {
-            return false; // mã đã bị đè trước đó / không tìm thấy
+            return false;
         }
 
-        $title = (string) $row->local_ledger_title;
-        $new_title = $title !== '' ? str_replace($pos_ref, $bhdcode, $title) : $title;
-        $wpdb->update($lt, array(
-            'local_ledger_code'  => $bhdcode,
-            'local_ledger_title' => $new_title,
-            'updated_at'         => current_time('mysql'),
-        ), array('local_ledger_id' => (int) $row->local_ledger_id));
+        $meta = json_decode((string) $row->local_ledger_advance_meta, true);
+        $meta = is_array($meta) ? $meta : array();
+        $htsoft = isset($meta['htsoft']) && is_array($meta['htsoft']) ? $meta['htsoft'] : array();
+        $htsoft['bhdcode']   = $bhdcode;
+        $htsoft['bhdid']     = isset($result['bhdid']) ? (string) $result['bhdid'] : (string) ($htsoft['bhdid'] ?? '');
+        $htsoft['pos_ref']   = $pos_ref;              // giữ mã POS gốc → mapping 2 chiều
+        $htsoft['status']    = 'ok';
+        $htsoft['via']       = 'addin';
+        $htsoft['pushed_at'] = current_time('mysql');
+        if (!empty($result['receipts']) && is_array($result['receipts'])) {
+            $htsoft['receipts'] = $result['receipts'];
+        }
+        if (!empty($result['bhdcode_z'])) {
+            $htsoft['bhdcode_z'] = (string) $result['bhdcode_z'];
+        }
+        $meta['htsoft'] = $htsoft;
 
-        // Cho tgs_pos reconcile phần còn lại (bill Z, phiếu thu BPTTCODE) nếu muốn.
+        $wpdb->update($lt,
+            array(
+                'local_ledger_advance_meta' => wp_json_encode($meta, JSON_UNESCAPED_UNICODE),
+                'updated_at'                => current_time('mysql'),
+            ),
+            array('local_ledger_id' => (int) $row->local_ledger_id)
+        );
+
+        // Cho tgs_pos reconcile phần còn lại (bill Z, phiếu thu BPTTCODE) nếu muốn — KHÔNG đổi mã.
         do_action('tgs_agent_invoice_reconciled', (int) $row->local_ledger_id, $bhdcode, $result, $pos_ref);
         return true;
     }
