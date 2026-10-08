@@ -70,9 +70,12 @@ class TGS_Agent_Admin
                 echo '<td>' . esc_html(trim($cust . ' ' . $phone)) . '</td>';
                 echo '<td>' . esc_html(number_format((float) ($o['local_ledger_total_amount'] ?? 0))) . '</td>';
                 echo '<td>' . esc_html((string) ($o['local_ledger_status'] ?? '')) . '</td>';
+                $uid = (int) ($o['user_id'] ?? 0);
+                $uobj = $uid ? get_userdata($uid) : null;
+                $uname = $uobj ? $uobj->user_login : ('#' . $uid);
                 echo '<td>' . (!empty($nv['nvid'])
                     ? esc_html((string) ($nv['nv_code'] ?: $nv['nvid']))
-                    : '<span style="color:#b32d2e;">chưa nối NV</span>') . '</td>';
+                    : '<span style="color:#b32d2e;">chưa nối NV</span><br><small>user: ' . esc_html($uname) . '</small>') . '</td>';
                 echo '<td>' . ($job ? '<span style="color:#1a7f37;">' . esc_html($job) . '</span>' : '—') . '</td>';
                 echo '<td>';
                 if ($job !== null) {

@@ -92,15 +92,28 @@ class TGS_Agent_Source
         return $srid !== '' ? $srid : null;
     }
 
-    /** WP USER (người bán) → ['nvid'=>GUID, 'nv_code'=>mã NV HTsoft]. */
+    /** WP USER (người bán) → ['nvid'=>GUID, 'nv_code'=>mã NV HTsoft].
+     * Staff lưu ở option RIÊNG `tgs_staff_management_data` (plugin tgs-multisite-hierarchy),
+     * keyed theo string user_id. Dùng API TGS_Staff_Data::get_htsoft_nvid() nếu có. */
     public static function resolve_nv($user_id)
     {
         $user_id = (int) $user_id;
         $out = array('nvid' => null, 'nv_code' => null);
         if ($user_id <= 0) { return $out; }
 
-        $data = self::hierarchy_data();
-        $nvid = isset($data['staff'][$user_id]['htsoft_nvid']) ? trim((string) $data['staff'][$user_id]['htsoft_nvid']) : '';
+        $nvid = '';
+        if (class_exists('TGS_Staff_Data')) {
+            $nvid = (string) TGS_Staff_Data::get_htsoft_nvid($user_id);
+        }
+        if ($nvid === '') {
+            // Fallback đọc thẳng option (lưu dạng array, keyed string user_id).
+            $data = get_site_option('tgs_staff_management_data', array());
+            if (is_string($data)) { $data = json_decode($data, true); }
+            if (is_array($data) && isset($data['staff'][strval($user_id)]['htsoft_nvid'])) {
+                $nvid = trim((string) $data['staff'][strval($user_id)]['htsoft_nvid']);
+            }
+        }
+        $nvid = trim($nvid);
         if ($nvid === '') { return $out; }
         $out['nvid'] = $nvid;
 
