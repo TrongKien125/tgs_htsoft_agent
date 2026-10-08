@@ -538,13 +538,94 @@ class TGS_Agent_Source
         return true;
     }
 
-    /** Hook tgs_after_order_create: auto tạo job nếu bật. */
+    /**
+     * Hook tgs_after_order_create.
+     *
+     * ── VÌ SAO KHÔNG ENQUEUE NGAY Ở ĐÂY NỮA (đổi 2026-10-09) ────────────────
+     * Trước kia tạo phiếu xong là enqueue luôn. Nhưng hóa đơn HTsoft nay tạo bằng
+     * AddIn gói trọn một lần, trong payload có khối eVAT (vat_invoice_of). eVAT lại
+     * được PHÁT HÀNH SAU lúc bán (bất đồng bộ qua tgs-viettel-invoice) -> nếu enqueue
+     * ngay lúc tạo thì vat luôn rỗng, hóa đơn HTsoft LUÔN THIẾU phần thuế.
+     *
+     * Nay enqueue DỜI sang SAU khi eVAT đã phát hành (invoice_state='done'), do
+     * sweep_evat_ready_orders() chạy theo WP-Cron đảm nhận. tgs-viettel-invoice KHÔNG
+     * bắn action lúc phát hành nên phải quét thay vì bắt sự kiện. Ở đây chỉ bảo đảm
+     * cron đã được lên lịch (phòng khi bật option sau khi plugin đã nạp).
+     */
     public static function on_order_create($sale_ledger_id, $order_data = null, $products_data = null, $metas = null)
+    {
+        self::ensure_enqueue_sweep_scheduled();
+    }
+
+    /** Lên lịch WP-Cron quét-enqueue nếu đang bật auto và chưa có lịch. */
+    public static function ensure_enqueue_sweep_scheduled()
     {
         if (get_option('tgs_agent_pos_auto') != 1) {
             return;
         }
-        self::queue_by_ledger_id((int) $sale_ledger_id);
+        if (!wp_next_scheduled('tgs_agent_enqueue_sweep')) {
+            wp_schedule_event(time() + 60, 'tgs_agent_5min', 'tgs_agent_enqueue_sweep');
+        }
+    }
+
+    /**
+     * QUÉT đơn bán đã PHÁT HÀNH eVAT và CHƯA đẩy HTsoft -> enqueue create_retail_invoice.
+     *
+     * Điều kiện (khớp vat_htsoft_candidates của tgs_pos cho nhánh 'sale'):
+     *   • phiếu bán POS (type 10, source POS), phiếu GỐC (không phải Z con),
+     *   • hóa đơn eVAT mới nhất của đơn invoice_state = 'done' (ĐÃ phát hành),
+     *   • chưa có mã HTsoft (advance_meta.htsoft.status != ok).
+     * queue_by_ledger_id() tự idempotent + guard "đã đẩy" nên gọi lặp an toàn.
+     *
+     * @return int số job vừa enqueue
+     */
+    public static function sweep_evat_ready_orders($limit = 50)
+    {
+        if (get_option('tgs_agent_pos_auto') != 1) {
+            return 0;
+        }
+        global $wpdb;
+        $L = self::ledger_table();
+        $V = $wpdb->prefix . 'local_viettel_invoice';
+        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $V)) !== $V) {
+            return 0; // site chưa dùng eVAT -> không có gì để quét
+        }
+        $sale_type  = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
+        $source_pos = defined('TGS_LEDGER_SOURCE_POS') ? (int) TGS_LEDGER_SOURCE_POS : 1;
+        // Chỉ quét đơn gần đây để nhẹ: eVAT phát hành muộn vài phút tới vài ngày.
+        $from  = gmdate('Y-m-d H:i:s', current_time('timestamp') - 7 * DAY_IN_SECONDS);
+        $limit = max(1, min(200, (int) $limit));
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT l.local_ledger_id
+               FROM {$L} l
+               INNER JOIN {$V} vi ON vi.local_viettel_invoice_id = (
+                     SELECT MAX(v2.local_viettel_invoice_id) FROM {$V} v2
+                      WHERE v2.sale_ledger_id = l.local_ledger_id
+                        AND (v2.is_deleted = 0 OR v2.is_deleted IS NULL))
+              WHERE l.local_ledger_type = %d
+                AND l.local_ledger_source = %d
+                AND (l.is_deleted = 0 OR l.is_deleted IS NULL)
+                AND (l.local_ledger_parent_id IS NULL OR l.local_ledger_parent_id = 0)
+                AND l.created_at >= %s
+                AND vi.invoice_state = 'done'
+                AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.local_ledger_advance_meta, '$.htsoft.status')), '') <> 'ok'
+              ORDER BY l.local_ledger_id DESC
+              LIMIT %d",
+            $sale_type,
+            $source_pos,
+            $from,
+            $limit
+        ), ARRAY_A) ?: array();
+
+        $n = 0;
+        foreach ($rows as $r) {
+            $res = self::queue_by_ledger_id((int) $r['local_ledger_id']);
+            if (!is_wp_error($res)) {
+                $n++;
+            }
+        }
+        return $n;
     }
 
     /* =====================================================================

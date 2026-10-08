@@ -63,7 +63,27 @@ add_action('admin_post_tgs_agent_requeue', array('TGS_Agent_Admin', 'handle_requ
 add_action('admin_post_tgs_agent_queue_order', array('TGS_Agent_Admin', 'handle_queue_order'));
 
 // Auto tạo job khi tgs_pos tạo phiếu bán (mặc định TẮT — bật bằng option 'tgs_agent_pos_auto').
+// LƯU Ý: không enqueue NGAY lúc tạo nữa — chờ eVAT phát hành (xem on_order_create +
+// sweep_evat_ready_orders). Hook này giờ chỉ bảo đảm WP-Cron quét đã được lên lịch.
 add_action('tgs_after_order_create', array('TGS_Agent_Source', 'on_order_create'), 20, 4);
+
+// WP-Cron: quét đơn đã PHÁT HÀNH eVAT + chưa đẩy -> enqueue create_retail_invoice.
+// Chạy sau lúc bán nên payload có khối VAT (vat_invoice_of) -> hóa đơn HTsoft đủ thuế.
+add_filter('cron_schedules', function ($s) {
+    if (!isset($s['tgs_agent_5min'])) {
+        $s['tgs_agent_5min'] = array('interval' => 300, 'display' => 'TGS Agent mỗi 5 phút');
+    }
+    return $s;
+});
+add_action('tgs_agent_enqueue_sweep', array('TGS_Agent_Source', 'sweep_evat_ready_orders'));
+add_action('init', array('TGS_Agent_Source', 'ensure_enqueue_sweep_scheduled'));
+// Gỡ lịch khi tắt plugin (chỉ cho blog đang active lúc đó).
+register_deactivation_hook(__FILE__, function () {
+    $ts = wp_next_scheduled('tgs_agent_enqueue_sweep');
+    if ($ts) {
+        wp_unschedule_event($ts, 'tgs_agent_enqueue_sweep');
+    }
+});
 
 // Auto tạo job create_return khi tgs_pos commit phiếu hoàn THUẦN (mặc định TẮT — bật bằng
 // option 'tgs_agent_return_auto'). Bật option này cũng TỰ TẮT đường đẩy trực tiếp cho hoàn
