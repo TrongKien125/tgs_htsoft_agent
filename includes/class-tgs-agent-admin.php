@@ -98,7 +98,8 @@ class TGS_Agent_Admin
                     echo '<span class="description">đã có job</span>';
                 } elseif ($can_queue) {
                     $url = wp_nonce_url(
-                        admin_url('admin-post.php?action=tgs_agent_queue_order&ledger_id=' . (int) ($o['local_ledger_id'] ?? 0)),
+                        admin_url('admin-post.php?action=tgs_agent_queue_order&ledger_id=' . (int) ($o['local_ledger_id'] ?? 0)
+                            . '&from=' . rawurlencode($from) . '&to=' . rawurlencode($to)),
                         'tgs_agent_queue_order_' . (int) ($o['local_ledger_id'] ?? 0)
                     );
                     echo '<a class="button button-primary button-small" href="' . esc_url($url) . '">Thêm vào queue</a>';
@@ -119,8 +120,10 @@ class TGS_Agent_Admin
         $res = TGS_Agent_Source::queue_by_ledger_id($ledger_id);
         $msg = is_wp_error($res) ? ('err:' . $res->get_error_message())
             : ('ok:' . (isset($res['created']) && $res['created'] ? 'created' : 'existed'));
-        wp_safe_redirect(add_query_arg('tgs_q', rawurlencode($msg),
-            admin_url('admin.php?page=tgs-htsoft-agent-orders')));
+        $args = array('page' => 'tgs-htsoft-agent-orders', 'tgs_q' => $msg);
+        if (isset($_GET['from'])) { $args['from'] = sanitize_text_field(wp_unslash($_GET['from'])); }
+        if (isset($_GET['to'])) { $args['to'] = sanitize_text_field(wp_unslash($_GET['to'])); }
+        wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
         exit;
     }
 
