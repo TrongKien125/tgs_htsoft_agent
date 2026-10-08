@@ -3,9 +3,18 @@ if (!defined('ABSPATH')) { exit; }
 
 /**
  * Bảng job + nonce. Dùng dbDelta khi kích hoạt.
+ *
+ * Multisite: register_activation_hook chỉ tạo bảng cho ĐÚNG blog đang active lúc
+ * kích hoạt — network-activate KHÔNG lặp qua từng site, nên các subsite khác thiếu
+ * bảng. maybe_install() vá chỗ này: tự tạo bảng cho blog đang phục vụ request lần
+ * đầu chạm tới (rẻ: kiểm một lần/blog/request). Nếu không có bước này, INSERT nonce
+ * trên subsite thiếu bảng sẽ lỗi và bị báo nhầm là "replay".
  */
 class TGS_Agent_DB
 {
+    /** Blog đã bảo đảm có bảng trong request này (tránh SHOW TABLES lặp lại). */
+    private static $ready = array();
+
     public static function jobs_table()
     {
         global $wpdb;
@@ -64,19 +73,43 @@ class TGS_Agent_DB
         dbDelta($sql_nonces);
     }
 
-    /** Ghi nonce một lần. Trả true nếu MỚI (chưa dùng). Tự dọn nonce hết hạn. */
+    /** Bảo đảm bảng của blog hiện tại đã có; tạo nếu thiếu. Kiểm một lần/blog/request. */
+    public static function maybe_install()
+    {
+        global $wpdb;
+        $blog = is_multisite() ? (int) get_current_blog_id() : 0;
+        if (!empty(self::$ready[$blog])) {
+            return;
+        }
+        $nonces = self::nonces_table();
+        $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $nonces));
+        if ($found !== $nonces) {
+            self::install(); // dbDelta tạo cả hai bảng cho đúng blog đang chạy; an toàn khi gọi lại.
+        }
+        self::$ready[$blog] = true;
+    }
+
+    /**
+     * Ghi nonce một lần. Tự dọn nonce hết hạn.
+     * Trả: true = MỚI (chưa dùng) · false = TRÙNG (replay thật) · WP_Error = lỗi lưu phía DB.
+     * Phân biệt rõ để tầng xác thực không báo nhầm lỗi DB thành "replay".
+     */
     public static function use_nonce($nonce, $client_id, $ttl_seconds)
     {
         global $wpdb;
+        self::maybe_install();
         $table = self::nonces_table();
         $now = current_time('mysql', true);
         $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE expires_at < %s", $now));
         $expires = gmdate('Y-m-d H:i:s', time() + (int) $ttl_seconds);
-        // INSERT IGNORE: nếu trùng -> 0 dòng -> đã dùng.
+        // INSERT IGNORE: 1 dòng = mới · 0 dòng = trùng (đã dùng) · false = lỗi câu lệnh.
         $affected = $wpdb->query($wpdb->prepare(
             "INSERT IGNORE INTO $table (nonce, client_id, expires_at) VALUES (%s, %s, %s)",
             $nonce, $client_id, $expires
         ));
+        if ($affected === false) {
+            return new WP_Error('NONCE_STORE_FAILED', 'Không ghi được nonce: ' . $wpdb->last_error);
+        }
         return $affected === 1;
     }
 }

@@ -37,8 +37,22 @@ require_once TGS_AGENT_DIR . 'includes/rest/class-tgs-agent-rest.php';
 require_once TGS_AGENT_DIR . 'includes/class-tgs-agent-admin.php';
 require_once TGS_AGENT_DIR . 'includes/class-tgs-agent-woo.php';
 
-// Tạo/cập nhật bảng khi kích hoạt.
+// Tạo/cập nhật bảng khi kích hoạt (chỉ cho blog đang active lúc đó trên multisite).
 register_activation_hook(__FILE__, array('TGS_Agent_DB', 'install'));
+
+// Multisite: subsite mới -> tạo bảng ngay trong ngữ cảnh site đó. Các request về sau
+// vẫn có maybe_install() bọc lót, nhưng tạo sẵn ở đây đỡ phải vá lúc chạy.
+add_action('wp_insert_site', function ($new_site) {
+    if (!is_multisite()) {
+        return;
+    }
+    switch_to_blog((int) $new_site->blog_id);
+    try {
+        TGS_Agent_DB::install();
+    } finally {
+        restore_current_blog();
+    }
+});
 
 // Đăng ký REST.
 add_action('rest_api_init', array('TGS_Agent_REST', 'register_routes'));

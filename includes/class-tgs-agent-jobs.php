@@ -17,6 +17,7 @@ class TGS_Agent_Jobs
     public static function create(array $args)
     {
         global $wpdb;
+        TGS_Agent_DB::maybe_install();
         $table = TGS_Agent_DB::jobs_table();
 
         $key = isset($args['idempotency_key']) ? trim((string) $args['idempotency_key']) : '';
@@ -91,6 +92,7 @@ class TGS_Agent_Jobs
     public static function claim_next($branch_code)
     {
         global $wpdb;
+        TGS_Agent_DB::maybe_install();
         $table = TGS_Agent_DB::jobs_table();
 
         self::expire_stale($branch_code);

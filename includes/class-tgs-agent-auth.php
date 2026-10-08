@@ -50,7 +50,13 @@ class TGS_Agent_Auth
             return self::deny('Chữ ký không hợp lệ.');
         }
 
-        if (!TGS_Agent_DB::use_nonce($nonce, $client_id, TGS_AGENT_NONCE_TTL)) {
+        // Chữ ký đã đúng tới đây -> ClientId + secret hợp lệ. Giờ mới xét nonce.
+        $nonce_ok = TGS_Agent_DB::use_nonce($nonce, $client_id, TGS_AGENT_NONCE_TTL);
+        if (is_wp_error($nonce_ok)) {
+            // Lỗi lưu nonce (vd thiếu bảng) KHÔNG phải replay -> 500 để báo đúng bệnh.
+            return new WP_Error('SERVER_ERROR', 'Không lưu được nonce phía máy chủ — báo quản trị kiểm bảng dữ liệu.', array('status' => 500));
+        }
+        if (!$nonce_ok) {
             return self::deny('Nonce đã được dùng (replay).');
         }
 
