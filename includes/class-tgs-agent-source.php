@@ -47,12 +47,37 @@ class TGS_Agent_Source
         return $wpdb->get_row($wpdb->prepare("SELECT * FROM $t WHERE local_ledger_id = %d", (int) $ledger_id), ARRAY_A);
     }
 
+    /** Loại ledger của phiếu XUẤT (nơi chứa dòng hàng) — con của phiếu bán type 10. */
+    private static function export_type()
+    {
+        return defined('TGS_LEDGER_TYPE_SALE') ? (int) TGS_LEDGER_TYPE_SALE : 2;
+    }
+
+    /** Phiếu xuất (type 2) con của phiếu bán — nơi THẬT SỰ chứa dòng hàng. 0 nếu không có. */
+    private static function export_ledger_of($sale_ledger_id)
+    {
+        global $wpdb;
+        $t = self::ledger_table();
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT local_ledger_id FROM $t
+             WHERE local_ledger_parent_id = %d AND local_ledger_type = %d
+               AND (is_deleted IS NULL OR is_deleted = 0)
+             ORDER BY local_ledger_id ASC LIMIT 1",
+            (int) $sale_ledger_id, self::export_type()
+        ));
+    }
+
     public static function get_items($ledger_id)
     {
         global $wpdb;
         $t = self::item_table();
+        $ledger_id = (int) $ledger_id;
+        // Dòng hàng nằm trên phiếu XUẤT (type 2) con của phiếu bán (type 10), KHÔNG
+        // trên phiếu bán. Hop sang export child; không có thì thử ngay ledger truyền vào.
+        $export_id = self::export_ledger_of($ledger_id);
+        $target = $export_id > 0 ? $export_id : $ledger_id;
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM $t WHERE local_ledger_id = %d ORDER BY local_ledger_item_id ASC", (int) $ledger_id
+            "SELECT * FROM $t WHERE local_ledger_id = %d ORDER BY local_ledger_item_id ASC", $target
         ), ARRAY_A);
         return is_array($rows) ? $rows : array();
     }
@@ -169,6 +194,19 @@ class TGS_Agent_Source
             );
         }
 
+        // NGUỒN BÁN: tên thật nằm trong advance_meta (khoá pos_sale_source), KHÔNG phải
+        // cột local_ledger_source (là ID, vd "1" — HTsoft không hiểu, gây lỗi lưu).
+        // Không có tên thật -> để TRỐNG, HTsoft tự đặt mặc định ("Gần shop").
+        $nguon_ban = '';
+        if (class_exists('TGS_POS_Sale_Source')) {
+            $nguon_ban = (string) TGS_POS_Sale_Source::read_from_meta($order['local_ledger_advance_meta'] ?? '');
+        } else {
+            $adv = json_decode((string) ($order['local_ledger_advance_meta'] ?? ''), true);
+            if (is_array($adv) && isset($adv['pos_sale_source'])) {
+                $nguon_ban = (string) $adv['pos_sale_source'];
+            }
+        }
+
         $total = round((float) ($order['local_ledger_total_amount'] ?? 0));
         $payload = array(
             'pos_ref'     => $code,
@@ -179,7 +217,7 @@ class TGS_Agent_Source
             'nvid'        => $nv['nvid'],          // GUID nhân viên (connector/SQL dùng trực tiếp)
             'nv_code'     => $nvCode,              // mã NV HTsoft (AddIn fill lên form)
             'ly_do_xuat'  => 'XBA',
-            'nguon_ban'   => (string) ($order['local_ledger_source'] ?? 'Gần shop'),
+            'nguon_ban'   => $nguon_ban,           // tên nguồn thật ('' = HTsoft tự đặt)
             'ghi_chu'     => (string) ($order['local_ledger_note'] ?? ($order['local_ledger_title'] ?? '')),
             'lines'       => $lines,
             'payments'    => array(array('hinh_thuc' => 'tien_mat', 'amount' => $total)),
