@@ -269,6 +269,64 @@ class TGS_Agent_Source
         );
     }
 
+    /**
+     * Phiếu thu của đơn → payments[] payload. Đọc HÌNH THỨC THẬT từ meta (không mặc định tiền mặt).
+     * Nguồn: local_ledger_meta.payment_receipts (như tgs_pos payments_of); fallback advance_meta.pos_payment.
+     *   hinh_thuc: cash/'' → 'tien_mat' (khớp PaymentMap); còn lại giữ key POS (vd 'ttck_up_vietinbank') → AddIn map.
+     * Bán nợ (credit_sale) → [] (AddIn để Công nợ). Không có phiếu thu hợp lệ → tiền mặt = tổng (như tgs_pos).
+     */
+    private static function payments_of(array $order)
+    {
+        global $wpdb;
+        $total = round((float) ($order['local_ledger_total_amount'] ?? 0));
+        $receipts = array();
+        $credit = false;
+
+        $mid = (int) ($order['local_ledger_meta_id'] ?? 0);
+        if ($mid > 0) {
+            $mt = $wpdb->prefix . 'local_ledger_meta';
+            $mv = $wpdb->get_var($wpdb->prepare(
+                "SELECT local_ledger_meta_value FROM $mt WHERE local_ledger_meta_id = %d", $mid
+            ));
+            $m = json_decode((string) $mv, true);
+            if (is_array($m)) {
+                if (!empty($m['credit_sale'])) { $credit = true; }
+                if (!empty($m['payment_receipts']) && is_array($m['payment_receipts'])) {
+                    $receipts = $m['payment_receipts'];
+                }
+            }
+        }
+        if (empty($receipts) && !$credit) {
+            $adv = json_decode((string) ($order['local_ledger_advance_meta'] ?? ''), true);
+            if (is_array($adv) && !empty($adv['pos_payment']['receipts']) && is_array($adv['pos_payment']['receipts'])) {
+                $receipts = $adv['pos_payment']['receipts'];
+            }
+        }
+
+        if ($credit) {
+            return array(); // bán nợ: không sinh phiếu thu
+        }
+
+        $payments = array();
+        foreach ($receipts as $r) {
+            $amt = round((float) ($r['amount'] ?? 0));
+            if ($amt <= 0) { continue; }
+            $method = strtolower(trim((string) ($r['method'] ?? '')));
+            $label  = (string) ($r['label'] ?? '');
+            $is_cash = $method === 'cash' || $method === '' || mb_stripos($label, 'tiền mặt') !== false || mb_stripos($label, 'tien mat') !== false;
+            $payments[] = array(
+                'hinh_thuc' => $is_cash ? 'tien_mat' : (string) ($r['method'] ?? ''), // key POS → AddIn PaymentMap
+                'amount'    => $amt,
+                'label'     => $label,                                                // nhãn để AddIn fallback/log
+                'ghi_chu'   => (string) ($r['note'] ?? ''),
+            );
+        }
+        if (empty($payments)) {
+            $payments[] = array('hinh_thuc' => 'tien_mat', 'amount' => $total, 'label' => 'Tiền mặt', 'ghi_chu' => '');
+        }
+        return $payments;
+    }
+
     /** Build payload §3 từ 1 phiếu bán. */
     public static function build_payload(array $order, array $items)
     {
@@ -320,7 +378,7 @@ class TGS_Agent_Source
             'nguon_ban'   => $nguon_ban,           // tên nguồn thật ('' = HTsoft tự đặt)
             'ghi_chu'     => (string) ($order['local_ledger_note'] ?? ($order['local_ledger_title'] ?? '')),
             'lines'       => $lines,
-            'payments'    => array(array('hinh_thuc' => 'tien_mat', 'amount' => $total)),
+            'payments'    => self::payments_of($order), // hình thức THẬT (cash/QR/…), không mặc định tiền mặt
             // Khối hóa đơn VAT (seri/mẫu số/số HĐ/thuế) để AddIn điền TAB THUẾ — null nếu chưa lập eVAT.
             'vat'         => self::vat_invoice_of((int) ($order['local_ledger_id'] ?? 0)),
             // Phiếu Z đi kèm: AddIn tạo HÓA ĐƠN THỨ HAI mã = <mã chính>+'Z' sau khi có mã chính. null nếu không tách.
