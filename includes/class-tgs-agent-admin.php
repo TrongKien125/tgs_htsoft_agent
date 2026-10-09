@@ -216,7 +216,15 @@ class TGS_Agent_Admin
         // Lưu cấu hình Woo.
         if (isset($_POST['tgs_agent_settings_nonce'])
             && check_admin_referer('tgs_agent_settings', 'tgs_agent_settings_nonce')) {
-            update_option('tgs_agent_pos_auto', isset($_POST['pos_auto']) ? 1 : 0);
+            $was_auto = get_option('tgs_agent_pos_auto') == 1;
+            $now_auto = isset($_POST['pos_auto']);
+            update_option('tgs_agent_pos_auto', $now_auto ? 1 : 0);
+            // Lần ĐẦU bật -> ghi mốc thời điểm: auto chỉ lấy đơn TỪ MỐC NÀY trở đi (không backfill cả quá khứ).
+            if ($now_auto && !$was_auto) {
+                update_option('tgs_agent_pos_auto_since', current_time('mysql'));
+            } elseif (!$now_auto) {
+                delete_option('tgs_agent_pos_auto_since');
+            }
             update_option('tgs_agent_return_auto', isset($_POST['return_auto']) ? 1 : 0);
             update_option('tgs_agent_woo_enabled', isset($_POST['woo_enabled']) ? 1 : 0);
             update_option('tgs_agent_woo_status', sanitize_text_field(wp_unslash($_POST['woo_status'] ?? 'processing')));

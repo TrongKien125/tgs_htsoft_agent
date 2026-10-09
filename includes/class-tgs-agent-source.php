@@ -603,8 +603,13 @@ class TGS_Agent_Source
         }
         $sale_type  = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
         $source_pos = defined('TGS_LEDGER_SOURCE_POS') ? (int) TGS_LEDGER_SOURCE_POS : 1;
-        // Chỉ quét đơn gần đây để nhẹ: eVAT phát hành muộn vài phút tới vài ngày.
-        $from  = gmdate('Y-m-d H:i:s', current_time('timestamp') - 7 * DAY_IN_SECONDS);
+        // CHỈ quét từ MỐC BẬT auto trở đi (không còn cửa sổ 7 ngày, không backfill quá khứ).
+        // Thiếu mốc (auto bật trước khi có logic này) -> khởi tạo = bây giờ => bắt đầu từ lúc này.
+        $from = (string) get_option('tgs_agent_pos_auto_since', '');
+        if ($from === '') {
+            $from = current_time('mysql');
+            update_option('tgs_agent_pos_auto_since', $from);
+        }
         $limit = max(1, min(200, (int) $limit));
 
         $rows = $wpdb->get_results($wpdb->prepare(
