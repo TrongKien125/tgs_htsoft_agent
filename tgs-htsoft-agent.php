@@ -68,8 +68,8 @@ add_action('admin_post_tgs_agent_delete_job', array('TGS_Agent_Admin', 'handle_d
 // sweep_evat_ready_orders). Hook này giờ chỉ bảo đảm WP-Cron quét đã được lên lịch.
 add_action('tgs_after_order_create', array('TGS_Agent_Source', 'on_order_create'), 20, 4);
 
-// Tạo job NGAY LẬP TỨC cho 1 phiếu (đồng bộ): do_action('tgs_agent_queue_now', $ledger_id).
-// KHÔNG phụ thuộc option auto / cron / eVAT — gọi ở đâu muốn tạo job tức thì.
+// Tạo job cho 1 phiếu NGAY trong request (đồng bộ): do_action('tgs_agent_queue_now', $ledger_id).
+// Không phụ thuộc option auto / cron, NHƯNG VẪN CHỜ eVAT: eVAT chưa phát hành xong -> EVAT_NOT_READY.
 add_action('tgs_agent_queue_now', array('TGS_Agent_Source', 'queue_now'), 10, 1);
 
 // WP-Cron: quét đơn đã PHÁT HÀNH eVAT + chưa đẩy -> enqueue create_retail_invoice.

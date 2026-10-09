@@ -223,6 +223,36 @@ class TGS_Agent_Source
         );
     }
 
+    /**
+     * Phiếu CÓ eVAT ĐANG TRONG QUÁ TRÌNH phát hành? (bản ghi eVAT mới nhất ở trạng thái
+     * 'pending'/'issued' — chưa phát hành xong và chưa lỗi). true -> PHẢI CHỜ cron eVAT
+     * xong mới tạo job HTsoft (để payload có khối thuế).
+     *
+     * CHỈ chặn khi đang chạy. Các tình huống SAU đều KHÔNG chờ (cho sang HTsoft luôn,
+     * vat=null nếu chưa có khối thuế) — theo chính sách đã chốt:
+     *   • Không có bản ghi eVAT (khách không lấy hóa đơn).
+     *   • Phát hành HỤT: 'issue_error'/'cqt_error'/'validate_error'/'error'.
+     *   • 'done' (đã phát hành — vat_invoice_of trả khối thuế).
+     */
+    public static function evat_is_pending($sale_ledger_id)
+    {
+        global $wpdb;
+        $vi = $wpdb->prefix . 'local_viettel_invoice';
+        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $vi)) !== $vi) {
+            return false; // site không dùng eVAT
+        }
+        $state = (string) $wpdb->get_var($wpdb->prepare(
+            "SELECT invoice_state FROM $vi WHERE sale_ledger_id = %d
+               AND (is_deleted = 0 OR is_deleted IS NULL)
+              ORDER BY local_viettel_invoice_id DESC LIMIT 1",
+            (int) $sale_ledger_id
+        ));
+        if ($state === '') {
+            return false; // chưa phát sinh eVAT -> đẩy luôn
+        }
+        return in_array($state, array('pending', 'issued'), true); // chỉ chờ khi đang phát hành
+    }
+
     /** Map dòng local_ledger_item → lines[] payload §3 (dùng chung cho đơn chính và phiếu Z). */
     private static function map_lines(array $items)
     {
@@ -470,6 +500,14 @@ class TGS_Agent_Source
                 'Phiếu đã có mã HTsoft (' . (string) $adv['htsoft']['bhdcode'] . ') — không queue lại.',
                 array('status' => 409));
         }
+        // PHẢI CHỜ eVAT: đơn có hóa đơn eVAT đang chờ phát hành -> KHÔNG tạo job. Chờ cron
+        // phát hành xong (invoice_state='done' + có số) rồi mới gửi, để payload đủ khối thuế.
+        // Áp cho MỌI đường: nút thủ công, queue_now, sweep cron.
+        if (self::evat_is_pending($ledger_id)) {
+            return new WP_Error('EVAT_NOT_READY',
+                'Hóa đơn eVAT chưa phát hành xong — chờ cron phát hành rồi mới tạo job HTsoft.',
+                array('status' => 409));
+        }
         $items = self::get_items($ledger_id);
         $payload = self::build_payload($order, $items);
 
@@ -577,10 +615,11 @@ class TGS_Agent_Source
     }
 
     /**
-     * TẠO JOB NGAY LẬP TỨC cho 1 phiếu (đồng bộ trong request, KHÔNG chờ cron, KHÔNG cần eVAT done).
-     * Dùng qua action: do_action('tgs_agent_queue_now', $ledger_id) — gọi ở bất cứ đâu (lúc tạo đơn /
-     * sau khi phát hành eVAT…). Vẫn áp mọi guard (chi nhánh/NV/Z/đã-đẩy) + idempotent. Nuốt lỗi để
-     * KHÔNG làm hỏng luồng gọi. Trả mảng kết quả.
+     * TẠO JOB cho 1 phiếu NGAY trong request (đồng bộ, không qua cron) nhưng VẪN CHỜ eVAT:
+     * nếu eVAT chưa phát hành xong -> trả EVAT_NOT_READY, KHÔNG tạo job (gọi lại sau khi phát hành).
+     * Dùng qua action: do_action('tgs_agent_queue_now', $ledger_id) — nên gọi SAU khi eVAT 'done'.
+     * Áp mọi guard (eVAT/chi nhánh/NV/Z/đã-đẩy) + idempotent. Nuốt lỗi để KHÔNG làm hỏng luồng gọi.
+     * Trả mảng kết quả.
      */
     public static function queue_now($ledger_id)
     {
@@ -618,11 +657,12 @@ class TGS_Agent_Source
     /**
      * QUÉT đơn bán đã PHÁT HÀNH eVAT và CHƯA đẩy HTsoft -> enqueue create_retail_invoice.
      *
-     * Điều kiện (khớp vat_htsoft_candidates của tgs_pos cho nhánh 'sale'):
+     * Điều kiện:
      *   • phiếu bán POS (type 10, source POS), phiếu GỐC (không phải Z con),
-     *   • hóa đơn eVAT mới nhất của đơn invoice_state = 'done' (ĐÃ phát hành),
+     *   • eVAT KHÔNG còn đang phát hành: bản ghi eVAT mới nhất KHÔNG ở 'pending'/'issued'
+     *     (gồm: không có eVAT, phát hành HỤT, hoặc 'done') — theo chính sách đã chốt,
      *   • chưa có mã HTsoft (advance_meta.htsoft.status != ok).
-     * queue_by_ledger_id() tự idempotent + guard "đã đẩy" nên gọi lặp an toàn.
+     * queue_by_ledger_id() tự idempotent + guard "đã đẩy"/"eVAT đang chờ" nên gọi lặp an toàn.
      *
      * @return int số job vừa enqueue
      */
@@ -651,7 +691,7 @@ class TGS_Agent_Source
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT l.local_ledger_id
                FROM {$L} l
-               INNER JOIN {$V} vi ON vi.local_viettel_invoice_id = (
+               LEFT JOIN {$V} vi ON vi.local_viettel_invoice_id = (
                      SELECT MAX(v2.local_viettel_invoice_id) FROM {$V} v2
                       WHERE v2.sale_ledger_id = l.local_ledger_id
                         AND (v2.is_deleted = 0 OR v2.is_deleted IS NULL))
@@ -660,7 +700,7 @@ class TGS_Agent_Source
                 AND (l.is_deleted = 0 OR l.is_deleted IS NULL)
                 AND (l.local_ledger_parent_id IS NULL OR l.local_ledger_parent_id = 0)
                 AND l.created_at >= %s
-                AND vi.invoice_state = 'done'
+                AND (vi.invoice_state IS NULL OR vi.invoice_state NOT IN ('pending','issued'))
                 AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.local_ledger_advance_meta, '$.htsoft.status')), '') <> 'ok'
               ORDER BY l.local_ledger_id DESC
               LIMIT %d",
