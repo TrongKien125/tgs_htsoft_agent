@@ -407,6 +407,14 @@ class TGS_Agent_Source
             }
         }
 
+        // LÝ DO XUẤT: lấy mã THẬT từ advance_meta (POS cho chọn XBA/XBB…), như tgs_pos đọc.
+        // Không có -> mặc định 'XBA' (xuất bán).
+        $ly_do_xuat = 'XBA';
+        if (class_exists('TGS_POS_Export_Reason')) {
+            $r = (string) TGS_POS_Export_Reason::read_from_meta($order['local_ledger_advance_meta'] ?? '');
+            if ($r !== '') { $ly_do_xuat = $r; }
+        }
+
         $total = round((float) ($order['local_ledger_total_amount'] ?? 0));
         $payload = array(
             'pos_ref'     => $code,
@@ -416,7 +424,7 @@ class TGS_Agent_Source
             'khach'       => $khach,
             'nvid'        => $nv['nvid'],          // GUID nhân viên (connector/SQL dùng trực tiếp)
             'nv_code'     => $nvCode,              // mã NV HTsoft (AddIn fill lên form)
-            'ly_do_xuat'  => 'XBA',
+            'ly_do_xuat'  => $ly_do_xuat,
             'nguon_ban'   => $nguon_ban,           // tên nguồn thật ('' = HTsoft tự đặt)
             'ghi_chu'     => (string) ($order['local_ledger_note'] ?? ($order['local_ledger_title'] ?? '')),
             'lines'       => $lines,
