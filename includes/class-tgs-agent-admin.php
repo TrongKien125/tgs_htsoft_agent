@@ -66,11 +66,11 @@ class TGS_Agent_Admin
         }
 
         echo '<table class="widefat striped"><thead><tr>'
-            . '<th>Mã phiếu</th><th>Ngày</th><th>Khách</th><th>Tổng tiền</th>'
+            . '<th>Mã phiếu</th><th>Ngày</th><th>Khách</th><th>Loại đơn</th><th>Tổng tiền</th><th>KM/CK</th>'
             . '<th>TT phiếu</th><th>NV (HTsoft)</th><th>Job</th><th></th></tr></thead><tbody>';
 
         if (!$orders) {
-            echo '<tr><td colspan="8">Chưa có phiếu bán (local_ledger type 10).</td></tr>';
+            echo '<tr><td colspan="10">Chưa có phiếu bán (local_ledger type 10).</td></tr>';
         } else {
             foreach ($orders as $o) {
                 $code = (string) ($o['local_ledger_code'] ?? '');
@@ -79,12 +79,20 @@ class TGS_Agent_Admin
                 $phone = (string) ($o['local_ledger_person_phone'] ?? '');
                 $nv = TGS_Agent_Source::resolve_nv($o['user_id'] ?? 0);
                 $can_queue = $job === null && $site_srid && !empty($nv['nvid']);
+                $otype = TGS_Agent_Source::order_type_label($o);
+                $pd = TGS_Agent_Source::promo_discount_of($o);
 
                 echo '<tr>';
                 echo '<td><strong>' . esc_html($code) . '</strong></td>';
                 echo '<td>' . esc_html((string) ($o['created_at'] ?? '')) . '</td>';
                 echo '<td>' . esc_html(trim($cust . ' ' . $phone)) . '</td>';
+                echo '<td>' . esc_html($otype)
+                    . ($pd['z'] ? ' <small style="color:#8250df;">+Z</small>' : '') . '</td>';
                 echo '<td>' . esc_html(number_format((float) ($o['local_ledger_total_amount'] ?? 0))) . '</td>';
+                $kmck = array();
+                if ($pd['km']) { $kmck[] = '<span style="background:#daf1dd;color:#1a7f37;padding:1px 6px;border-radius:3px;">KM</span>'; }
+                if ($pd['ck']) { $kmck[] = '<span style="background:#fde8c8;color:#8a6116;padding:1px 6px;border-radius:3px;">CK ' . esc_html(number_format($pd['ck_amount'])) . '</span>'; }
+                echo '<td>' . ($kmck ? implode(' ', $kmck) : '—') . '</td>';
                 echo '<td>' . esc_html((string) ($o['local_ledger_status'] ?? '')) . '</td>';
                 $uid = (int) ($o['user_id'] ?? 0);
                 $uobj = $uid ? get_userdata($uid) : null;

@@ -399,6 +399,60 @@ class TGS_Agent_Source
         return $payments;
     }
 
+    /** Đơn BÁN NỢ? (meta local_ledger có cờ credit_sale) — khớp is_credit_sale của tgs_pos. */
+    public static function is_credit_sale(array $order)
+    {
+        global $wpdb;
+        $mid = (int) ($order['local_ledger_meta_id'] ?? 0);
+        if ($mid <= 0) { return false; }
+        $mt = $wpdb->prefix . 'local_ledger_meta';
+        $mv = $wpdb->get_var($wpdb->prepare(
+            "SELECT local_ledger_meta_value FROM $mt WHERE local_ledger_meta_id = %d", $mid
+        ));
+        $m = json_decode((string) $mv, true);
+        return is_array($m) && !empty($m['credit_sale']);
+    }
+
+    /** Có phiếu Z (tách hàng khuyến mãi) con của đơn bán này không? (kiểm tra nhẹ, không load dòng). */
+    private static function has_bill_z_child($sale_ledger_id)
+    {
+        global $wpdb;
+        $t = self::ledger_table();
+        $sale_type = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
+        $id = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT local_ledger_id FROM $t
+             WHERE local_ledger_parent_id = %d AND local_ledger_type = %d
+               AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
+            (int) $sale_ledger_id, $sale_type
+        ));
+        return $id > 0;
+    }
+
+    /** Nhãn "loại đơn" cho màn Danh sách: 'Bán nợ' nếu credit_sale, ngược lại 'Bán lẻ'. */
+    public static function order_type_label(array $order)
+    {
+        return self::is_credit_sale($order) ? 'Bán nợ' : 'Bán lẻ';
+    }
+
+    /**
+     * Đơn có KHUYẾN MÃI / CHIẾT KHẤU? Dùng cho màn Danh sách.
+     * - km: có dòng quà tặng (gift_type > 0) HOẶC có phiếu Z (tách hàng KM).
+     * - ck: tổng chiết khấu dòng > 0.
+     * Trả array('km'=>bool, 'ck'=>bool, 'z'=>bool, 'ck_amount'=>float).
+     */
+    public static function promo_discount_of(array $order)
+    {
+        $ledger_id = (int) ($order['local_ledger_id'] ?? 0);
+        $ck = 0.0; $km = false;
+        foreach (self::get_items($ledger_id) as $it) {
+            $ck += (float) ($it['local_ledger_item_discount_amount'] ?? 0);
+            if ((int) ($it['local_ledger_item_gift_type'] ?? 0) > 0) { $km = true; }
+        }
+        $z = self::has_bill_z_child($ledger_id);
+        if ($z) { $km = true; }
+        return array('km' => $km, 'ck' => $ck > 0, 'z' => $z, 'ck_amount' => $ck);
+    }
+
     /** Build payload §3 từ 1 phiếu bán. */
     public static function build_payload(array $order, array $items)
     {
