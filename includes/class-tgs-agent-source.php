@@ -111,6 +111,17 @@ class TGS_Agent_Source
         return $row ? $row->status : null;
     }
 
+    /** Xoá job create_retail_invoice của 1 đơn (theo local_ledger_code). Trả số dòng xoá. */
+    public static function delete_job_for_code($code)
+    {
+        $code = trim((string) $code);
+        if ($code === '') {
+            return 0;
+        }
+        $key = get_current_blog_id() . ':create_retail_invoice:' . $code;
+        return TGS_Agent_Jobs::delete_by_idempotency_key($key);
+    }
+
     /** Option data của tgs-multisite-hierarchy (sites[].htsoft_srid, staff[].htsoft_nvid). */
     private static function hierarchy_data()
     {

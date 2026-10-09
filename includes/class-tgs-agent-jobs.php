@@ -64,6 +64,30 @@ class TGS_Agent_Jobs
         return array('job_id' => $job_id, 'status' => 'queued', 'created' => true);
     }
 
+    /** Xoá job theo idempotency_key. Trả số dòng đã xoá (0 nếu không có). */
+    public static function delete_by_idempotency_key($key)
+    {
+        global $wpdb;
+        $key = trim((string) $key);
+        if ($key === '') {
+            return 0;
+        }
+        $table = TGS_Agent_DB::jobs_table();
+        return (int) $wpdb->delete($table, array('idempotency_key' => $key));
+    }
+
+    /** Xoá job theo job_id. Trả số dòng đã xoá (0 nếu không có). */
+    public static function delete_by_id($job_id)
+    {
+        global $wpdb;
+        $job_id = trim((string) $job_id);
+        if ($job_id === '') {
+            return 0;
+        }
+        $table = TGS_Agent_DB::jobs_table();
+        return (int) $wpdb->delete($table, array('job_id' => $job_id));
+    }
+
     /** Dọn job claimed quá lease không heartbeat -> unknown (không tự cấp lại). */
     public static function expire_stale($branch_code = null)
     {

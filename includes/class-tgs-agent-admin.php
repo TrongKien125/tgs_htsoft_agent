@@ -95,7 +95,14 @@ class TGS_Agent_Admin
                 echo '<td>' . ($job ? '<span style="color:#1a7f37;">' . esc_html($job) . '</span>' : '—') . '</td>';
                 echo '<td>';
                 if ($job !== null) {
-                    echo '<span class="description">đã có job</span>';
+                    $del_url = wp_nonce_url(
+                        admin_url('admin-post.php?action=tgs_agent_delete_job&ledger_id=' . (int) ($o['local_ledger_id'] ?? 0)
+                            . '&from=' . rawurlencode($from) . '&to=' . rawurlencode($to)),
+                        'tgs_agent_delete_job_' . (int) ($o['local_ledger_id'] ?? 0)
+                    );
+                    echo '<span class="description">đã có job</span> ';
+                    echo '<a class="button button-small" style="color:#b32d2e;border-color:#b32d2e;" href="'
+                        . esc_url($del_url) . '" onclick="return confirm(\'Xoá job khỏi queue cho đơn này?\');">Xoá queue</a>';
                 } elseif ($can_queue) {
                     $url = wp_nonce_url(
                         admin_url('admin-post.php?action=tgs_agent_queue_order&ledger_id=' . (int) ($o['local_ledger_id'] ?? 0)
@@ -110,6 +117,22 @@ class TGS_Agent_Admin
             }
         }
         echo '</tbody></table></div>';
+    }
+
+    public static function handle_delete_job()
+    {
+        if (!current_user_can('manage_options')) { wp_die('Không đủ quyền'); }
+        $ledger_id = isset($_GET['ledger_id']) ? (int) $_GET['ledger_id'] : 0;
+        check_admin_referer('tgs_agent_delete_job_' . $ledger_id);
+        $order = TGS_Agent_Source::get_order($ledger_id);
+        $code = $order ? (string) ($order['local_ledger_code'] ?? '') : '';
+        $deleted = $code !== '' ? TGS_Agent_Source::delete_job_for_code($code) : 0;
+        $msg = $deleted > 0 ? 'ok:deleted' : 'err:không tìm thấy job để xoá';
+        $args = array('page' => 'tgs-htsoft-agent-orders', 'tgs_q' => $msg);
+        if (isset($_GET['from'])) { $args['from'] = sanitize_text_field(wp_unslash($_GET['from'])); }
+        if (isset($_GET['to'])) { $args['to'] = sanitize_text_field(wp_unslash($_GET['to'])); }
+        wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
+        exit;
     }
 
     public static function handle_queue_order()

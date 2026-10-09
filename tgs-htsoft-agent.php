@@ -61,6 +61,7 @@ add_action('rest_api_init', array('TGS_Agent_REST', 'register_routes'));
 add_action('admin_menu', array('TGS_Agent_Admin', 'register_menu'));
 add_action('admin_post_tgs_agent_requeue', array('TGS_Agent_Admin', 'handle_requeue'));
 add_action('admin_post_tgs_agent_queue_order', array('TGS_Agent_Admin', 'handle_queue_order'));
+add_action('admin_post_tgs_agent_delete_job', array('TGS_Agent_Admin', 'handle_delete_job'));
 
 // Auto tạo job khi tgs_pos tạo phiếu bán (mặc định TẮT — bật bằng option 'tgs_agent_pos_auto').
 // LƯU Ý: không enqueue NGAY lúc tạo nữa — chờ eVAT phát hành (xem on_order_create +
