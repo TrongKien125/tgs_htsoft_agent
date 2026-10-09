@@ -568,6 +568,27 @@ class TGS_Agent_Source
         self::ensure_enqueue_sweep_scheduled();
     }
 
+    /**
+     * TẠO JOB NGAY LẬP TỨC cho 1 phiếu (đồng bộ trong request, KHÔNG chờ cron, KHÔNG cần eVAT done).
+     * Dùng qua action: do_action('tgs_agent_queue_now', $ledger_id) — gọi ở bất cứ đâu (lúc tạo đơn /
+     * sau khi phát hành eVAT…). Vẫn áp mọi guard (chi nhánh/NV/Z/đã-đẩy) + idempotent. Nuốt lỗi để
+     * KHÔNG làm hỏng luồng gọi. Trả mảng kết quả.
+     */
+    public static function queue_now($ledger_id)
+    {
+        try {
+            $res = self::queue_by_ledger_id((int) $ledger_id);
+            if (is_wp_error($res)) {
+                error_log('[TGS Agent] queue_now (ledger ' . (int) $ledger_id . '): ' . $res->get_error_message());
+                return array('ok' => false, 'error' => $res->get_error_message());
+            }
+            return array('ok' => true) + (array) $res;
+        } catch (\Throwable $e) {
+            error_log('[TGS Agent] queue_now exception (ledger ' . (int) $ledger_id . '): ' . $e->getMessage());
+            return array('ok' => false, 'error' => $e->getMessage());
+        }
+    }
+
     /** Lên lịch WP-Cron quét-enqueue nếu đang bật auto và chưa có lịch. */
     public static function ensure_enqueue_sweep_scheduled()
     {
