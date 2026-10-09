@@ -595,8 +595,15 @@ class TGS_Agent_Source
         if (get_option('tgs_agent_pos_auto') != 1) {
             return;
         }
+        // Nếu đã có lịch nhưng chu kỳ cũ (5 phút) -> gỡ để lên lại 2 phút.
+        if (function_exists('wp_get_scheduled_event')) {
+            $ev = wp_get_scheduled_event('tgs_agent_enqueue_sweep');
+            if ($ev && isset($ev->schedule) && $ev->schedule !== 'tgs_agent_2min') {
+                wp_unschedule_event($ev->timestamp, 'tgs_agent_enqueue_sweep');
+            }
+        }
         if (!wp_next_scheduled('tgs_agent_enqueue_sweep')) {
-            wp_schedule_event(time() + 60, 'tgs_agent_5min', 'tgs_agent_enqueue_sweep');
+            wp_schedule_event(time() + 60, 'tgs_agent_2min', 'tgs_agent_enqueue_sweep');
         }
     }
 

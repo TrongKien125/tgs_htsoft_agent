@@ -75,8 +75,8 @@ add_action('tgs_agent_queue_now', array('TGS_Agent_Source', 'queue_now'), 10, 1)
 // WP-Cron: quét đơn đã PHÁT HÀNH eVAT + chưa đẩy -> enqueue create_retail_invoice.
 // Chạy sau lúc bán nên payload có khối VAT (vat_invoice_of) -> hóa đơn HTsoft đủ thuế.
 add_filter('cron_schedules', function ($s) {
-    if (!isset($s['tgs_agent_5min'])) {
-        $s['tgs_agent_5min'] = array('interval' => 300, 'display' => 'TGS Agent mỗi 5 phút');
+    if (!isset($s['tgs_agent_2min'])) {
+        $s['tgs_agent_2min'] = array('interval' => 120, 'display' => 'TGS Agent mỗi 2 phút');
     }
     return $s;
 });
