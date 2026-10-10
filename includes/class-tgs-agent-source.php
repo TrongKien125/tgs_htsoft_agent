@@ -253,6 +253,58 @@ class TGS_Agent_Source
         return in_array($state, array('pending', 'issued'), true); // chỉ chờ khi đang phát hành
     }
 
+    /**
+     * Trạng thái eVAT HIỆN TẠI của đơn (bản ghi local_viettel_invoice mới nhất).
+     * Trả array('state'=>string, 'no'=>'<ký hiệu+số>', 'done'=>bool). state='' = chưa có eVAT.
+     */
+    public static function evat_current($sale_ledger_id)
+    {
+        global $wpdb;
+        $vi = $wpdb->prefix . 'local_viettel_invoice';
+        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $vi)) !== $vi) {
+            return array('state' => '', 'no' => '', 'done' => false);
+        }
+        $v = $wpdb->get_row($wpdb->prepare(
+            "SELECT invoice_state, invoice_series, viettel_invoice_no
+               FROM $vi WHERE sale_ledger_id = %d
+                 AND (is_deleted = 0 OR is_deleted IS NULL)
+              ORDER BY local_viettel_invoice_id DESC LIMIT 1",
+            (int) $sale_ledger_id
+        ), ARRAY_A);
+        if (!$v) {
+            return array('state' => '', 'no' => '', 'done' => false);
+        }
+        $state  = (string) ($v['invoice_state'] ?? '');
+        $series = trim((string) $v['invoice_series']);
+        $no     = trim((string) $v['viettel_invoice_no']);
+        $full   = ($series !== '' && $no !== '' && stripos($no, $series) !== 0) ? ($series . $no) : $no;
+        return array('state' => $state, 'no' => $full, 'done' => ($state === 'done' && $no !== ''));
+    }
+
+    /**
+     * eVAT trong payload job (snapshot LÚC TẠO JOB) theo mã phiếu.
+     * Trả array('had'=>bool, 'no'=>string) — had=true nếu payload.vat có số hóa đơn.
+     * null = chưa có job create_retail_invoice cho mã này.
+     */
+    public static function evat_at_push($code)
+    {
+        global $wpdb;
+        $code = trim((string) $code);
+        if ($code === '') { return null; }
+        $jt = TGS_Agent_DB::jobs_table();
+        $key = get_current_blog_id() . ':create_retail_invoice:' . $code;
+        $payload_json = $wpdb->get_var($wpdb->prepare(
+            "SELECT payload_json FROM $jt WHERE idempotency_key = %s", $key
+        ));
+        if ($payload_json === null) { return null; }
+        $p = json_decode((string) $payload_json, true);
+        $vat = is_array($p) && isset($p['vat']) ? $p['vat'] : null;
+        if (is_array($vat) && !empty($vat['so_hoa_don'])) {
+            return array('had' => true, 'no' => (string) $vat['so_hoa_don']);
+        }
+        return array('had' => false, 'no' => '');
+    }
+
     /** Map dòng local_ledger_item → lines[] payload §3 (dùng chung cho đơn chính và phiếu Z). */
     private static function map_lines(array $items)
     {
@@ -413,19 +465,24 @@ class TGS_Agent_Source
         return is_array($m) && !empty($m['credit_sale']);
     }
 
-    /** Có phiếu Z (tách hàng khuyến mãi) con của đơn bán này không? (kiểm tra nhẹ, không load dòng). */
-    private static function has_bill_z_child($sale_ledger_id)
+    /** ID phiếu Z (tách hàng khuyến mãi) con của đơn bán này — 0 nếu không có. */
+    public static function bill_z_ledger_id($sale_ledger_id)
     {
         global $wpdb;
         $t = self::ledger_table();
         $sale_type = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
-        $id = (int) $wpdb->get_var($wpdb->prepare(
+        return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT local_ledger_id FROM $t
              WHERE local_ledger_parent_id = %d AND local_ledger_type = %d
                AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1",
             (int) $sale_ledger_id, $sale_type
         ));
-        return $id > 0;
+    }
+
+    /** Có phiếu Z con của đơn bán này không? (kiểm tra nhẹ, không load dòng). */
+    private static function has_bill_z_child($sale_ledger_id)
+    {
+        return self::bill_z_ledger_id($sale_ledger_id) > 0;
     }
 
     /** Nhãn "loại đơn" cho màn Danh sách: 'Bán nợ' nếu credit_sale, ngược lại 'Bán lẻ'. */
@@ -584,6 +641,71 @@ class TGS_Agent_Source
             'branch_code'     => $branch,
             'payload'         => $payload,
             'requested_by'    => 'tgs_pos',
+        ));
+    }
+
+    /**
+     * ĐẨY LẠI CHỈ PHIẾU Z (tách khuyến mãi) của một đơn bán.
+     *
+     * Phiếu Z BẢN THÂN là một ledger bán (type 10) có mã riêng (<mã chính>+'Z') và dòng hàng
+     * riêng, nên ta đẩy CHÍNH ledger Z đó qua ĐÚNG LUỒNG ĐƠN THƯỜNG 'create_retail_invoice'
+     * (dùng build_payload như mọi đơn) — AddIn xử lý y hệt, KHÔNG cần action mới. Z nội bộ nên
+     * payload tự có vat=null (không eVAT) và bill_z=null (Z không có Z con).
+     *
+     * $sale_ledger_id có thể là phiếu GỐC (tự tìm Z con) hoặc chính phiếu Z.
+     * Là nút "đẩy lại" thủ công nên XÓA job cũ của mã Z rồi tạo mới (re-queue thật sự).
+     * Trả kết quả TGS_Agent_Jobs::create() hoặc WP_Error.
+     */
+    public static function queue_bill_z_by_ledger_id($sale_ledger_id)
+    {
+        $sale_ledger_id = (int) $sale_ledger_id;
+        if (!self::get_order($sale_ledger_id)) {
+            return new WP_Error('NOT_FOUND', 'Không tìm thấy phiếu');
+        }
+        // Bấm trên phiếu gốc -> tìm Z con; bấm thẳng trên phiếu Z -> dùng luôn.
+        $z_id = self::is_bill_z_ledger($sale_ledger_id)
+            ? $sale_ledger_id
+            : self::bill_z_ledger_id($sale_ledger_id);
+        if ($z_id <= 0) {
+            return new WP_Error('NO_BILL_Z', 'Đơn này không có phiếu Z (tách khuyến mãi).', array('status' => 422));
+        }
+        $z_order = self::get_order($z_id);
+        if (!$z_order) {
+            return new WP_Error('NO_BILL_Z', 'Không đọc được phiếu Z.', array('status' => 422));
+        }
+        $z_code = (string) ($z_order['local_ledger_code'] ?? '');
+        if ($z_code === '') {
+            return new WP_Error('NO_CODE', 'Phiếu Z thiếu local_ledger_code');
+        }
+
+        // Dựng payload Z y như đơn thường (lines từ phiếu xuất của Z; vat/bill_z tự = null).
+        $z_items = self::get_items($z_id);
+        $payload = self::build_payload($z_order, $z_items);
+
+        if (empty($payload['srid'])) {
+            return new WP_Error('NO_BRANCH',
+                'Site chưa nối chi nhánh HTsoft (SRID) — không tạo queue. Cấu hình ở tgs-multisite-hierarchy.');
+        }
+        if (empty($payload['nvid'])) {
+            $uid = (int) ($z_order['user_id'] ?? 0);
+            return new WP_Error('NO_NV',
+                'Người bán (user #' . $uid . ') chưa nối nhân viên HTsoft (NVID) — không tạo queue.');
+        }
+        if (empty($payload['lines'])) {
+            return new WP_Error('NO_LINES', 'Phiếu Z không có dòng hàng hợp lệ — không tạo queue.');
+        }
+
+        $branch = (string) ($payload['branch_code'] ?? '');
+        $key = get_current_blog_id() . ':create_retail_invoice:' . $z_code;
+        // "Đẩy lại" → xóa job cũ của mã Z rồi tạo mới để thực sự re-queue.
+        TGS_Agent_Jobs::delete_by_idempotency_key($key);
+
+        return TGS_Agent_Jobs::create(array(
+            'idempotency_key' => $key,
+            'action'          => 'create_retail_invoice',
+            'branch_code'     => $branch,
+            'payload'         => $payload,
+            'requested_by'    => 'admin_manual_z',
         ));
     }
 

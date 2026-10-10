@@ -67,10 +67,10 @@ class TGS_Agent_Admin
 
         echo '<table class="widefat striped"><thead><tr>'
             . '<th>Mã phiếu</th><th>Ngày</th><th>Khách</th><th>Loại đơn</th><th>Tổng tiền</th><th>KM/CK</th>'
-            . '<th>TT phiếu</th><th>NV (HTsoft)</th><th>Job</th><th></th></tr></thead><tbody>';
+            . '<th>eVAT</th><th>TT phiếu</th><th>NV (HTsoft)</th><th>Job</th><th></th></tr></thead><tbody>';
 
         if (!$orders) {
-            echo '<tr><td colspan="10">Chưa có phiếu bán (local_ledger type 10).</td></tr>';
+            echo '<tr><td colspan="11">Chưa có phiếu bán (local_ledger type 10).</td></tr>';
         } else {
             foreach ($orders as $o) {
                 $code = (string) ($o['local_ledger_code'] ?? '');
@@ -93,6 +93,32 @@ class TGS_Agent_Admin
                 if ($pd['km']) { $kmck[] = '<span style="background:#daf1dd;color:#1a7f37;padding:1px 6px;border-radius:3px;">KM</span>'; }
                 if ($pd['ck']) { $kmck[] = '<span style="background:#fde8c8;color:#8a6116;padding:1px 6px;border-radius:3px;">CK ' . esc_html(number_format($pd['ck_amount'])) . '</span>'; }
                 echo '<td>' . ($kmck ? implode(' ', $kmck) : '—') . '</td>';
+
+                // eVAT: trạng thái HIỆN TẠI + snapshot LÚC ĐẨY (payload job có khối vat chưa).
+                $ev_now  = TGS_Agent_Source::evat_current((int) ($o['local_ledger_id'] ?? 0));
+                $ev_push = TGS_Agent_Source::evat_at_push($code);
+                $st = $ev_now['state'];
+                if ($st === '') {
+                    $now_html = '<span style="color:#999;">Không có</span>';
+                } elseif ($ev_now['done']) {
+                    $now_html = '<span style="color:#1a7f37;">✔ ' . esc_html($ev_now['no']) . '</span>';
+                } elseif (in_array($st, array('pending', 'issued'), true)) {
+                    $now_html = '<span style="color:#8a6116;">Đang phát hành</span>';
+                } else {
+                    $now_html = '<span style="color:#b32d2e;">Lỗi: ' . esc_html($st) . '</span>';
+                }
+                if ($ev_push === null) {
+                    $push_html = '<span style="color:#999;">chưa tạo job</span>';
+                } elseif (!empty($ev_push['had'])) {
+                    $push_html = '<span style="color:#1a7f37;">✔ có'
+                        . ($ev_push['no'] !== '' ? ' ' . esc_html($ev_push['no']) : '') . '</span>';
+                } else {
+                    $push_html = '<span style="color:#b32d2e;">chưa có</span>';
+                }
+                echo '<td style="font-size:11px;line-height:1.5;">'
+                    . '<small>Hiện tại:</small> ' . $now_html . '<br>'
+                    . '<small>Lúc đẩy:</small> ' . $push_html . '</td>';
+
                 echo '<td>' . esc_html((string) ($o['local_ledger_status'] ?? '')) . '</td>';
                 $uid = (int) ($o['user_id'] ?? 0);
                 $uobj = $uid ? get_userdata($uid) : null;
@@ -120,6 +146,16 @@ class TGS_Agent_Admin
                     echo '<a class="button button-primary button-small" href="' . esc_url($url) . '">Thêm vào queue</a>';
                 } else {
                     echo '<span class="description" style="color:#b32d2e;">thiếu chi nhánh/NV</span>';
+                }
+                // Nút ĐẨY LẠI CHỈ PHIẾU Z (độc lập với job phiếu gốc) — chỉ khi đơn có Z + đủ chi nhánh/NV.
+                if (!empty($pd['z']) && $site_srid && !empty($nv['nvid'])) {
+                    $z_url = wp_nonce_url(
+                        admin_url('admin-post.php?action=tgs_agent_queue_bill_z&ledger_id=' . (int) ($o['local_ledger_id'] ?? 0)
+                            . '&from=' . rawurlencode($from) . '&to=' . rawurlencode($to)),
+                        'tgs_agent_queue_bill_z_' . (int) ($o['local_ledger_id'] ?? 0)
+                    );
+                    echo '<br><a class="button button-small" style="margin-top:4px;color:#8250df;border-color:#8250df;" href="'
+                        . esc_url($z_url) . '" onclick="return confirm(\'Đẩy lại RIÊNG phiếu Z (tách KM) của đơn này?\');">Đẩy lại mã Z</a>';
                 }
                 echo '</td></tr>';
             }
@@ -151,6 +187,21 @@ class TGS_Agent_Admin
         $res = TGS_Agent_Source::queue_by_ledger_id($ledger_id);
         $msg = is_wp_error($res) ? ('err:' . $res->get_error_message())
             : ('ok:' . (isset($res['created']) && $res['created'] ? 'created' : 'existed'));
+        $args = array('page' => 'tgs-htsoft-agent-orders', 'tgs_q' => $msg);
+        if (isset($_GET['from'])) { $args['from'] = sanitize_text_field(wp_unslash($_GET['from'])); }
+        if (isset($_GET['to'])) { $args['to'] = sanitize_text_field(wp_unslash($_GET['to'])); }
+        wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
+        exit;
+    }
+
+    public static function handle_queue_bill_z()
+    {
+        if (!current_user_can('manage_options')) { wp_die('Không đủ quyền'); }
+        $ledger_id = isset($_GET['ledger_id']) ? (int) $_GET['ledger_id'] : 0;
+        check_admin_referer('tgs_agent_queue_bill_z_' . $ledger_id);
+        $res = TGS_Agent_Source::queue_bill_z_by_ledger_id($ledger_id);
+        $msg = is_wp_error($res) ? ('err:' . $res->get_error_message())
+            : ('ok:Z ' . (isset($res['created']) && $res['created'] ? 'created' : 'existed'));
         $args = array('page' => 'tgs-htsoft-agent-orders', 'tgs_q' => $msg);
         if (isset($_GET['from'])) { $args['from'] = sanitize_text_field(wp_unslash($_GET['from'])); }
         if (isset($_GET['to'])) { $args['to'] = sanitize_text_field(wp_unslash($_GET['to'])); }
