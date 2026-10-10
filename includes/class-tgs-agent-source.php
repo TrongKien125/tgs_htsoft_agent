@@ -26,6 +26,165 @@ class TGS_Agent_Source
         return $wpdb->prefix . 'local_ledger_item';
     }
 
+    /** Bảng có tồn tại? Cache trong request để khỏi SHOW TABLES lặp mỗi dòng. */
+    private static function table_exists($table)
+    {
+        static $cache = array();
+        if (array_key_exists($table, $cache)) { return $cache[$table]; }
+        global $wpdb;
+        $cache[$table] = ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) === $table);
+        return $cache[$table];
+    }
+
+    /**
+     * PREFETCH dữ liệu cho màn "Danh sách đơn": gom theo LÔ thay vì query mỗi dòng.
+     * Trả array('jobs'=>[code=>row], 'evat'=>[id=>{state,no,done}], 'credit'=>[id=>bool],
+     *           'promo'=>[id=>{km,ck,z,ck_amount}]).
+     */
+    public static function prefetch_list(array $orders)
+    {
+        global $wpdb;
+        $out = array('jobs' => array(), 'evat' => array(), 'credit' => array(), 'promo' => array());
+        if (!$orders) { return $out; }
+
+        $ids = array(); $codes = array(); $meta_ids = array();
+        foreach ($orders as $o) {
+            $id  = (int) ($o['local_ledger_id'] ?? 0);
+            if ($id > 0) { $ids[] = $id; }
+            $c   = (string) ($o['local_ledger_code'] ?? '');
+            if ($c !== '') { $codes[$c] = $id; }
+            $mid = (int) ($o['local_ledger_meta_id'] ?? 0);
+            if ($mid > 0) { $meta_ids[$mid] = $id; }
+        }
+        $ids = array_values(array_unique($ids));
+        $blog = get_current_blog_id();
+
+        // JOBS (status + payload) theo idempotency_key create_retail_invoice.
+        if ($codes) {
+            $keys = array();
+            foreach ($codes as $c => $id) { $keys[$blog . ':create_retail_invoice:' . $c] = $c; }
+            $ph = implode(',', array_fill(0, count($keys), '%s'));
+            $jt = TGS_Agent_DB::jobs_table();
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT idempotency_key, job_id, status, branch_code, action, bhdcode, bhdid,
+                        error_code, error_message, result_json, attempt_count,
+                        created_at, updated_at, claimed_at, heartbeat_at, payload_json
+                   FROM $jt WHERE idempotency_key IN ($ph)",
+                array_keys($keys)
+            ), ARRAY_A) ?: array();
+            foreach ($rows as $r) {
+                $code = isset($keys[$r['idempotency_key']]) ? $keys[$r['idempotency_key']] : '';
+                if ($code !== '') { $out['jobs'][$code] = $r; }
+            }
+        }
+
+        // CREDIT (bán nợ) từ local_ledger_meta.
+        if ($meta_ids) {
+            $mt = $wpdb->prefix . 'local_ledger_meta';
+            $ph = implode(',', array_fill(0, count($meta_ids), '%d'));
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT local_ledger_meta_id, local_ledger_meta_value FROM $mt WHERE local_ledger_meta_id IN ($ph)",
+                array_keys($meta_ids)
+            ), ARRAY_A) ?: array();
+            foreach ($rows as $r) {
+                $oid = $meta_ids[(int) $r['local_ledger_meta_id']] ?? 0;
+                if ($oid <= 0) { continue; }
+                $m = json_decode((string) $r['local_ledger_meta_value'], true);
+                $out['credit'][$oid] = (is_array($m) && !empty($m['credit_sale']));
+            }
+        }
+
+        if (!$ids) { return $out; }
+        $idlist = implode(',', array_map('intval', $ids)); // toàn int -> an toàn
+
+        // eVAT hiện tại: bản ghi mới nhất mỗi đơn.
+        $V = $wpdb->prefix . 'local_viettel_invoice';
+        if (self::table_exists($V)) {
+            $rows = $wpdb->get_results(
+                "SELECT vi.sale_ledger_id, vi.invoice_state, vi.invoice_series, vi.viettel_invoice_no
+                   FROM $V vi
+                   INNER JOIN (SELECT sale_ledger_id, MAX(local_viettel_invoice_id) mx FROM $V
+                                WHERE sale_ledger_id IN ($idlist) AND (is_deleted = 0 OR is_deleted IS NULL)
+                                GROUP BY sale_ledger_id) t
+                     ON vi.local_viettel_invoice_id = t.mx",
+                ARRAY_A
+            ) ?: array();
+            foreach ($rows as $v) {
+                $sid    = (int) $v['sale_ledger_id'];
+                $state  = (string) $v['invoice_state'];
+                $series = trim((string) $v['invoice_series']);
+                $no     = trim((string) $v['viettel_invoice_no']);
+                $full   = ($series !== '' && $no !== '' && stripos($no, $series) !== 0) ? ($series . $no) : $no;
+                $out['evat'][$sid] = array('state' => $state, 'no' => $full, 'done' => ($state === 'done' && $no !== ''));
+            }
+        }
+
+        // PROMO (KM/CK) + Z: export child -> dòng hàng; z child.
+        $L = self::ledger_table();
+        $IT = self::item_table();
+        $sale_type   = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);
+        $export_type = self::export_type();
+        foreach ($ids as $id) { $out['promo'][$id] = array('km' => false, 'ck' => false, 'z' => false, 'ck_amount' => 0.0); }
+
+        // Dòng hàng nằm trên phiếu XUẤT (type 2) con; không có thì nằm ngay trên phiếu bán.
+        $target_of = array(); // sale_id => ledger_id chứa dòng hàng
+        foreach ($ids as $id) { $target_of[$id] = $id; }
+        $rows = $wpdb->get_results(
+            "SELECT local_ledger_id, local_ledger_parent_id FROM $L
+              WHERE local_ledger_parent_id IN ($idlist) AND local_ledger_type = " . (int) $export_type . "
+                AND (is_deleted IS NULL OR is_deleted = 0)
+              ORDER BY local_ledger_id ASC",
+            ARRAY_A
+        ) ?: array();
+        foreach ($rows as $r) {
+            $pid = (int) $r['local_ledger_parent_id'];
+            if (isset($target_of[$pid]) && $target_of[$pid] === $pid) { // export child đầu tiên
+                $target_of[$pid] = (int) $r['local_ledger_id'];
+            }
+        }
+        $sale_of_target = array();
+        foreach ($target_of as $sale => $tgt) { $sale_of_target[$tgt] = $sale; }
+        $tlist = implode(',', array_map('intval', array_unique(array_values($target_of))));
+
+        $rows = $wpdb->get_results(
+            "SELECT local_ledger_id, local_ledger_item_discount_amount, local_ledger_item_gift_type
+               FROM $IT WHERE local_ledger_id IN ($tlist)",
+            ARRAY_A
+        ) ?: array();
+        foreach ($rows as $it) {
+            $sale = $sale_of_target[(int) $it['local_ledger_id']] ?? 0;
+            if ($sale <= 0 || !isset($out['promo'][$sale])) { continue; }
+            $out['promo'][$sale]['ck_amount'] += (float) ($it['local_ledger_item_discount_amount'] ?? 0);
+            if ((int) ($it['local_ledger_item_gift_type'] ?? 0) > 0) { $out['promo'][$sale]['km'] = true; }
+        }
+
+        $rows = $wpdb->get_results(
+            "SELECT DISTINCT local_ledger_parent_id FROM $L
+              WHERE local_ledger_parent_id IN ($idlist) AND local_ledger_type = " . (int) $sale_type . "
+                AND (is_deleted IS NULL OR is_deleted = 0)",
+            ARRAY_A
+        ) ?: array();
+        foreach ($rows as $r) {
+            $pid = (int) $r['local_ledger_parent_id'];
+            if (isset($out['promo'][$pid])) { $out['promo'][$pid]['z'] = true; $out['promo'][$pid]['km'] = true; }
+        }
+        foreach ($out['promo'] as $id => $p) { $out['promo'][$id]['ck'] = ($p['ck_amount'] > 0); }
+
+        return $out;
+    }
+
+    /** Snapshot eVAT từ 1 dòng job đã prefetch (payload_json). Trả array('had','no') hoặc null. */
+    public static function evat_push_from_row($row)
+    {
+        if (!$row || !isset($row['payload_json'])) { return null; }
+        $p = json_decode((string) $row['payload_json'], true);
+        $vat = is_array($p) && isset($p['vat']) ? $p['vat'] : null;
+        if (is_array($vat) && !empty($vat['so_hoa_don'])) {
+            return array('had' => true, 'no' => (string) $vat['so_hoa_don']);
+        }
+        return array('had' => false, 'no' => '');
+    }
+
     /** Danh sách phiếu bán gần nhất (type 10). */
     /**
      * Phiếu bán (type 10), lọc theo khoảng NGÀY (created_at). $from/$to dạng 'Y-m-d' (rỗng = bỏ lọc đầu đó).
@@ -136,6 +295,14 @@ class TGS_Agent_Source
     public static function resolve_srid($blog_id = null)
     {
         $blog_id = $blog_id ?: (int) get_current_blog_id();
+        static $cache = array();
+        if (array_key_exists($blog_id, $cache)) { return $cache[$blog_id]; }
+        $cache[$blog_id] = self::resolve_srid_uncached($blog_id);
+        return $cache[$blog_id];
+    }
+
+    private static function resolve_srid_uncached($blog_id)
+    {
         if (class_exists('TGS_DM_Site')) {
             $srid = TGS_DM_Site::htsoft_srid($blog_id);
             if ($srid) { return $srid; }
@@ -151,6 +318,14 @@ class TGS_Agent_Source
     public static function resolve_nv($user_id)
     {
         $user_id = (int) $user_id;
+        static $cache = array();
+        if (array_key_exists($user_id, $cache)) { return $cache[$user_id]; }
+        $cache[$user_id] = self::resolve_nv_uncached($user_id);
+        return $cache[$user_id];
+    }
+
+    private static function resolve_nv_uncached($user_id)
+    {
         $out = array('nvid' => null, 'nv_code' => null);
         if ($user_id <= 0) { return $out; }
 
@@ -172,7 +347,7 @@ class TGS_Agent_Source
 
         global $wpdb;
         $t = $wpdb->base_prefix . 'htsoft_nhanvien'; // global toàn network
-        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $t)) === $t) {
+        if (self::table_exists($t)) {
             $code = $wpdb->get_var($wpdb->prepare("SELECT NVCODE FROM {$t} WHERE NVID = %s", $nvid));
             if ($code) { $out['nv_code'] = (string) $code; }
         }
@@ -190,7 +365,7 @@ class TGS_Agent_Source
     {
         global $wpdb;
         $vi = $wpdb->prefix . 'local_viettel_invoice';
-        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $vi)) !== $vi) {
+        if (!self::table_exists($vi)) {
             return null;
         }
         $v = $wpdb->get_row($wpdb->prepare(
@@ -238,7 +413,7 @@ class TGS_Agent_Source
     {
         global $wpdb;
         $vi = $wpdb->prefix . 'local_viettel_invoice';
-        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $vi)) !== $vi) {
+        if (!self::table_exists($vi)) {
             return false; // site không dùng eVAT
         }
         $state = (string) $wpdb->get_var($wpdb->prepare(
@@ -261,7 +436,7 @@ class TGS_Agent_Source
     {
         global $wpdb;
         $vi = $wpdb->prefix . 'local_viettel_invoice';
-        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $vi)) !== $vi) {
+        if (!self::table_exists($vi)) {
             return array('state' => '', 'no' => '', 'done' => false);
         }
         $v = $wpdb->get_row($wpdb->prepare(
@@ -850,7 +1025,7 @@ class TGS_Agent_Source
         global $wpdb;
         $L = self::ledger_table();
         $V = $wpdb->prefix . 'local_viettel_invoice';
-        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $V)) !== $V) {
+        if (!self::table_exists($V)) {
             return 0; // site chưa dùng eVAT -> không có gì để quét
         }
         $sale_type  = (int) get_option('tgs_agent_ledger_sale_type', self::SALE_TYPE);

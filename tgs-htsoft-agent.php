@@ -62,6 +62,7 @@ add_action('admin_menu', array('TGS_Agent_Admin', 'register_menu'));
 add_action('admin_post_tgs_agent_requeue', array('TGS_Agent_Admin', 'handle_requeue'));
 add_action('admin_post_tgs_agent_queue_order', array('TGS_Agent_Admin', 'handle_queue_order'));
 add_action('admin_post_tgs_agent_queue_bill_z', array('TGS_Agent_Admin', 'handle_queue_bill_z'));
+add_action('admin_post_tgs_agent_recreate_job', array('TGS_Agent_Admin', 'handle_recreate_job'));
 add_action('admin_post_tgs_agent_delete_job', array('TGS_Agent_Admin', 'handle_delete_job'));
 
 // Auto tạo job khi tgs_pos tạo phiếu bán (mặc định TẮT — bật bằng option 'tgs_agent_pos_auto').

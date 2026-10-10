@@ -50,6 +50,7 @@ class TGS_Agent_Admin
         if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) { $to = $today; }
 
         $orders = TGS_Agent_Source::recent_sale_orders(1000, $from, $to);
+        $pf = TGS_Agent_Source::prefetch_list($orders); // gom dữ liệu theo lô (tránh query mỗi dòng)
         $auto = get_option('tgs_agent_pos_auto') == 1;
         $site_srid = TGS_Agent_Source::resolve_srid();
 
@@ -76,26 +77,36 @@ class TGS_Agent_Admin
         echo '<style>.tgs-orders td,.tgs-orders th{padding:4px 8px;font-size:12px;vertical-align:top;}'
             . '.tgs-orders small{color:#888;}</style>';
         echo '<table class="widefat striped tgs-orders"><thead><tr>'
+            . '<th style="width:40px;">STT</th>'
             . '<th>Mã / Ngày</th><th>Khách</th><th>Loại · KM/CK</th><th style="text-align:right;">Tổng tiền</th>'
             . '<th>eVAT</th><th>TT</th><th>NV</th><th>Job</th><th>Thao tác</th></tr></thead><tbody>';
 
         if (!$orders) {
-            echo '<tr><td colspan="9">Chưa có phiếu bán (local_ledger type 10).</td></tr>';
+            echo '<tr><td colspan="10">Chưa có phiếu bán (local_ledger type 10).</td></tr>';
         } else {
+            // STT đánh TỪ DƯỚI LÊN: đơn cũ nhất (cuối bảng) = 1, mới nhất (đầu bảng) = tổng số.
+            $total_rows = count($orders);
+            $row_index = 0;
             foreach ($orders as $o) {
-                $code = (string) ($o['local_ledger_code'] ?? '');
-                $job = TGS_Agent_Source::job_status_for_code($code);
-                $cust = (string) ($o['local_ledger_person_name'] ?? '');
-                $phone = (string) ($o['local_ledger_person_phone'] ?? '');
-                $nv = TGS_Agent_Source::resolve_nv($o['user_id'] ?? 0);
-                $can_queue = $job === null && $site_srid && !empty($nv['nvid']);
-                $otype = TGS_Agent_Source::order_type_label($o);
-                $pd = TGS_Agent_Source::promo_discount_of($o);
-
+                $stt = $total_rows - $row_index;
+                $row_index++;
                 $lid = (int) ($o['local_ledger_id'] ?? 0);
                 $dates = '&from=' . rawurlencode($from) . '&to=' . rawurlencode($to);
 
+                $code = (string) ($o['local_ledger_code'] ?? '');
+                $job_row = isset($pf['jobs'][$code]) ? $pf['jobs'][$code] : null;
+                $job = $job_row ? (string) $job_row['status'] : null;
+                $cust = (string) ($o['local_ledger_person_name'] ?? '');
+                $phone = (string) ($o['local_ledger_person_phone'] ?? '');
+                $nv = TGS_Agent_Source::resolve_nv($o['user_id'] ?? 0); // cache theo user trong request
+                $can_queue = $job === null && $site_srid && !empty($nv['nvid']);
+                $otype = !empty($pf['credit'][$lid]) ? 'Bán nợ' : 'Bán lẻ';
+                $pd = isset($pf['promo'][$lid]) ? $pf['promo'][$lid]
+                    : array('km' => false, 'ck' => false, 'z' => false, 'ck_amount' => 0.0);
+
                 echo '<tr>';
+                // STT (từ dưới lên)
+                echo '<td style="color:#888;">' . (int) $stt . '</td>';
                 // Mã / Ngày
                 echo '<td><strong>' . esc_html($code) . '</strong><br>'
                     . '<small>' . esc_html((string) ($o['created_at'] ?? '')) . '</small></td>';
@@ -112,9 +123,10 @@ class TGS_Agent_Admin
                 echo '<td style="text-align:right;white-space:nowrap;">'
                     . esc_html(number_format((float) ($o['local_ledger_total_amount'] ?? 0))) . '</td>';
 
-                // eVAT: hiện tại + lúc đẩy (gọn, chi tiết ở tooltip)
-                $ev_now  = TGS_Agent_Source::evat_current($lid);
-                $ev_push = TGS_Agent_Source::evat_at_push($code);
+                // eVAT: hiện tại + lúc đẩy (gọn, chi tiết ở tooltip) — lấy từ prefetch.
+                $ev_now  = isset($pf['evat'][$lid]) ? $pf['evat'][$lid]
+                    : array('state' => '', 'no' => '', 'done' => false);
+                $ev_push = $job_row ? TGS_Agent_Source::evat_push_from_row($job_row) : null;
                 $st = $ev_now['state'];
                 if ($st === '') {
                     $now_pill = self::pill('–', '#eee', '#888', 'Chưa có eVAT');
@@ -147,8 +159,36 @@ class TGS_Agent_Admin
                     ? esc_html((string) ($nv['nv_code'] ?: $nv['nvid']))
                     : self::pill('chưa nối NV', '#fde1e1', '#b32d2e') . '<br><small>' . esc_html($uname) . '</small>') . '</td>';
 
-                // Job
-                echo '<td>' . ($job ? self::pill($job, '#daf1dd', '#1a7f37') : '—') . '</td>';
+                // Job: click mở modal chi tiết (+ nút Tạo lại job trong modal).
+                if ($job_row) {
+                    $jd  = "Job: " . $job_row['job_id'] . "\n"
+                         . "Trạng thái: " . $job_row['status'] . "\n"
+                         . "Action: " . $job_row['action'] . "\n"
+                         . "Chi nhánh: " . $job_row['branch_code'] . "\n"
+                         . "BHDCODE: " . (string) $job_row['bhdcode'] . "\n"
+                         . "Lần thử (attempt): " . $job_row['attempt_count'] . "\n"
+                         . "Tạo: " . $job_row['created_at'] . "   | Cập nhật: " . $job_row['updated_at'] . "\n"
+                         . "Claim: " . ($job_row['claimed_at'] ?: '—') . "   | Heartbeat: " . ($job_row['heartbeat_at'] ?: '—') . "\n";
+                    $jerr = trim((($job_row['error_code'] ? $job_row['error_code'] . ': ' : '') . (string) $job_row['error_message']));
+                    if ($jerr !== '') { $jd .= "Lỗi: " . $jerr . "\n"; }
+                    if (!empty($job_row['result_json'])) {
+                        $rj = json_decode((string) $job_row['result_json'], true);
+                        $jd .= "\nresult_json:\n" . (is_array($rj)
+                            ? wp_json_encode($rj, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                            : (string) $job_row['result_json']);
+                    }
+                    $recreate = wp_nonce_url(
+                        admin_url('admin-post.php?action=tgs_agent_recreate_job&ledger_id=' . $lid . $dates),
+                        'tgs_agent_recreate_job_' . $lid
+                    );
+                    echo '<td><a href="#" class="tgs-job-detail" title="Xem chi tiết job"'
+                        . ' data-title="Job đơn ' . esc_attr($code) . '"'
+                        . ' data-detail="' . esc_attr($jd) . '"'
+                        . ' data-recreate="' . esc_attr($recreate) . '">'
+                        . self::pill($job, '#daf1dd', '#1a7f37') . '</a></td>';
+                } else {
+                    echo '<td>—</td>';
+                }
 
                 // Thao tác
                 echo '<td style="white-space:nowrap;">';
@@ -185,7 +225,77 @@ class TGS_Agent_Admin
         }
         echo '</tbody></table>';
         self::render_confirm_modal();
+        self::render_job_modal();
         echo '</div>';
+    }
+
+    /** Modal chi tiết job (link .tgs-job-detail): hiện data-detail + nút Copy + Tạo lại job (data-recreate). */
+    private static function render_job_modal()
+    {
+        ?>
+        <div id="tgs-job-overlay" style="display:none;position:fixed;inset:0;z-index:100000;
+            background:rgba(0,0,0,.5);">
+          <div role="dialog" aria-modal="true" aria-labelledby="tgs-job-title" style="max-width:640px;
+              margin:8% auto;background:#fff;border-radius:6px;box-shadow:0 8px 30px rgba(0,0,0,.3);padding:18px 20px;">
+            <h2 id="tgs-job-title" style="margin:0 0 10px;font-size:16px;">Chi tiết job</h2>
+            <pre id="tgs-job-body" style="max-height:50vh;overflow:auto;background:#f6f7f7;padding:10px;
+                border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0 0 14px;"></pre>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <a class="button button-primary" id="tgs-job-recreate" href="#"
+                 style="background:#8250df;border-color:#8250df;">Tạo lại job</a>
+              <span>
+                <button type="button" class="button" id="tgs-job-copy">Copy</button>
+                <button type="button" class="button" id="tgs-job-close">Đóng</button>
+              </span>
+            </div>
+          </div>
+        </div>
+        <script>
+        (function () {
+            var ov = document.getElementById('tgs-job-overlay'),
+                title = document.getElementById('tgs-job-title'),
+                body = document.getElementById('tgs-job-body'),
+                copy = document.getElementById('tgs-job-copy'),
+                recreate = document.getElementById('tgs-job-recreate'),
+                closeB = document.getElementById('tgs-job-close');
+            function close() { ov.style.display = 'none'; }
+            function fallback(t) {
+                var ta = document.createElement('textarea');
+                ta.value = t; document.body.appendChild(ta); ta.select();
+                try { document.execCommand('copy'); copy.textContent = 'Đã copy ✓'; }
+                catch (e) { copy.textContent = 'Copy lỗi'; }
+                document.body.removeChild(ta);
+            }
+            document.addEventListener('click', function (e) {
+                var a = e.target.closest ? e.target.closest('a.tgs-job-detail') : null;
+                if (!a) { return; }
+                e.preventDefault();
+                title.textContent = a.getAttribute('data-title') || 'Chi tiết job';
+                body.textContent = a.getAttribute('data-detail') || '';
+                var rc = a.getAttribute('data-recreate');
+                if (rc) { recreate.href = rc; recreate.style.display = ''; }
+                else { recreate.style.display = 'none'; }
+                copy.textContent = 'Copy';
+                ov.style.display = 'block';
+            });
+            copy.addEventListener('click', function () {
+                var t = body.textContent;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(t).then(function () { copy.textContent = 'Đã copy ✓'; },
+                        function () { fallback(t); });
+                } else { fallback(t); }
+            });
+            recreate.addEventListener('click', function (e) {
+                if (!window.confirm('Xoá job hiện tại và TẠO LẠI job mới cho đơn này?')) { e.preventDefault(); }
+            });
+            closeB.addEventListener('click', close);
+            ov.addEventListener('click', function (e) { if (e.target === ov) { close(); } });
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape' && ov.style.display === 'block') { close(); }
+            });
+        })();
+        </script>
+        <?php
     }
 
     /** Modal xác nhận dùng chung cho các nút có class .tgs-confirm (data-confirm, data-ok). */
@@ -279,6 +389,25 @@ class TGS_Agent_Admin
         exit;
     }
 
+    public static function handle_recreate_job()
+    {
+        if (!current_user_can('manage_options')) { wp_die('Không đủ quyền'); }
+        $ledger_id = isset($_GET['ledger_id']) ? (int) $_GET['ledger_id'] : 0;
+        check_admin_referer('tgs_agent_recreate_job_' . $ledger_id);
+        // Xoá job cũ (nếu có) rồi tạo lại — áp đủ guard eVAT/chi nhánh/NV/đã-đẩy trong queue_by_ledger_id.
+        $order = TGS_Agent_Source::get_order($ledger_id);
+        $code = $order ? (string) ($order['local_ledger_code'] ?? '') : '';
+        if ($code !== '') { TGS_Agent_Source::delete_job_for_code($code); }
+        $res = TGS_Agent_Source::queue_by_ledger_id($ledger_id);
+        $msg = is_wp_error($res) ? ('err:' . $res->get_error_message())
+            : ('ok:recreated ' . (isset($res['created']) && $res['created'] ? 'created' : 'existed'));
+        $args = array('page' => 'tgs-htsoft-agent-orders', 'tgs_q' => $msg);
+        if (isset($_GET['from'])) { $args['from'] = sanitize_text_field(wp_unslash($_GET['from'])); }
+        if (isset($_GET['to'])) { $args['to'] = sanitize_text_field(wp_unslash($_GET['to'])); }
+        wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
+        exit;
+    }
+
     // ----- Jobs list -----
     public static function render()
     {
@@ -322,7 +451,27 @@ class TGS_Agent_Admin
                 echo '<td>' . esc_html($r->action) . '</td>';
                 echo '<td><strong>' . esc_html($r->status) . '</strong></td>';
                 echo '<td>' . esc_html((string) $r->bhdcode) . '</td>';
-                echo '<td>' . esc_html(trim(($r->error_code ? $r->error_code . ': ' : '') . (string) $r->error_message)) . '</td>';
+
+                // Lỗi: hiện gọn, click mở modal chi tiết (kèm result_json) + nút copy.
+                $err = trim(($r->error_code ? $r->error_code . ': ' : '') . (string) $r->error_message);
+                if ($err === '' && empty($r->result_json)) {
+                    echo '<td>—</td>';
+                } else {
+                    $detail = $err;
+                    if (!empty($r->result_json)) {
+                        $pj = json_decode((string) $r->result_json, true);
+                        $pretty = is_array($pj)
+                            ? wp_json_encode($pj, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                            : (string) $r->result_json;
+                        $detail .= ($detail !== '' ? "\n\n" : '') . "result_json:\n" . $pretty;
+                    }
+                    $short = $err !== '' ? mb_strimwidth($err, 0, 48, '…') : 'xem chi tiết';
+                    $color = $err !== '' ? '#b32d2e' : '#2271b1';
+                    echo '<td><a href="#" class="tgs-detail" style="color:' . $color . ';" '
+                        . 'data-title="Chi tiết job ' . esc_attr(substr($r->job_id, 0, 8)) . '" '
+                        . 'data-detail="' . esc_attr($detail) . '">' . esc_html($short) . '</a></td>';
+                }
+
                 echo '<td>';
                 if (in_array($r->status, array('failed', 'cancelled'), true)) {
                     $url = wp_nonce_url(
@@ -334,7 +483,67 @@ class TGS_Agent_Admin
                 echo '</td></tr>';
             }
         }
-        echo '</tbody></table></div>';
+        echo '</tbody></table>';
+        self::render_detail_modal();
+        echo '</div>';
+    }
+
+    /** Modal xem chi tiết (dùng cho .tgs-detail): hiện data-detail trong <pre> + nút Copy. */
+    private static function render_detail_modal()
+    {
+        ?>
+        <div id="tgs-detail-overlay" style="display:none;position:fixed;inset:0;z-index:100000;
+            background:rgba(0,0,0,.5);">
+          <div role="dialog" aria-modal="true" aria-labelledby="tgs-detail-title" style="max-width:640px;
+              margin:8% auto;background:#fff;border-radius:6px;box-shadow:0 8px 30px rgba(0,0,0,.3);padding:18px 20px;">
+            <h2 id="tgs-detail-title" style="margin:0 0 10px;font-size:16px;">Chi tiết</h2>
+            <pre id="tgs-detail-body" style="max-height:50vh;overflow:auto;background:#f6f7f7;padding:10px;
+                border-radius:4px;white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0 0 14px;"></pre>
+            <div style="text-align:right;">
+              <button type="button" class="button" id="tgs-detail-copy">Copy</button>
+              <button type="button" class="button button-primary" id="tgs-detail-close">Đóng</button>
+            </div>
+          </div>
+        </div>
+        <script>
+        (function () {
+            var ov = document.getElementById('tgs-detail-overlay'),
+                title = document.getElementById('tgs-detail-title'),
+                body = document.getElementById('tgs-detail-body'),
+                copy = document.getElementById('tgs-detail-copy'),
+                closeB = document.getElementById('tgs-detail-close');
+            function close() { ov.style.display = 'none'; }
+            function fallback(t) {
+                var ta = document.createElement('textarea');
+                ta.value = t; document.body.appendChild(ta); ta.select();
+                try { document.execCommand('copy'); copy.textContent = 'Đã copy ✓'; }
+                catch (e) { copy.textContent = 'Copy lỗi'; }
+                document.body.removeChild(ta);
+            }
+            document.addEventListener('click', function (e) {
+                var a = e.target.closest ? e.target.closest('a.tgs-detail') : null;
+                if (!a) { return; }
+                e.preventDefault();
+                title.textContent = a.getAttribute('data-title') || 'Chi tiết';
+                body.textContent = a.getAttribute('data-detail') || '';
+                copy.textContent = 'Copy';
+                ov.style.display = 'block';
+            });
+            copy.addEventListener('click', function () {
+                var t = body.textContent;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(t).then(function () { copy.textContent = 'Đã copy ✓'; },
+                        function () { fallback(t); });
+                } else { fallback(t); }
+            });
+            closeB.addEventListener('click', close);
+            ov.addEventListener('click', function (e) { if (e.target === ov) { close(); } });
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape' && ov.style.display === 'block') { close(); }
+            });
+        })();
+        </script>
+        <?php
     }
 
     // ----- Quản lý đồng bộ -----
