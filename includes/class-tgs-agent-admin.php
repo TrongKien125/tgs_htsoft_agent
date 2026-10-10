@@ -22,6 +22,14 @@ class TGS_Agent_Admin
             'tgs-htsoft-agent-sync', array(__CLASS__, 'render_sync'));
     }
 
+    /** Badge nhỏ gọn cho bảng (text, nền, chữ, tooltip). */
+    private static function pill($text, $bg, $fg, $title = '')
+    {
+        return '<span title="' . esc_attr($title) . '" style="display:inline-block;padding:0 6px;'
+            . 'border-radius:3px;background:' . $bg . ';color:' . $fg . ';font-size:11px;'
+            . 'line-height:18px;white-space:nowrap;">' . $text . '</span>';
+    }
+
     // ----- Danh sách đơn (tgs_pos) + nút thêm vào queue thủ công -----
     public static function render_orders()
     {
@@ -65,12 +73,14 @@ class TGS_Agent_Admin
                 . 'Đơn chỉ vào queue được khi <strong>người bán đã nối nhân viên HTsoft (NVID)</strong>.</p>';
         }
 
-        echo '<table class="widefat striped"><thead><tr>'
-            . '<th>Mã phiếu</th><th>Ngày</th><th>Khách</th><th>Loại đơn</th><th>Tổng tiền</th><th>KM/CK</th>'
-            . '<th>eVAT</th><th>TT phiếu</th><th>NV (HTsoft)</th><th>Job</th><th></th></tr></thead><tbody>';
+        echo '<style>.tgs-orders td,.tgs-orders th{padding:4px 8px;font-size:12px;vertical-align:top;}'
+            . '.tgs-orders small{color:#888;}</style>';
+        echo '<table class="widefat striped tgs-orders"><thead><tr>'
+            . '<th>Mã / Ngày</th><th>Khách</th><th>Loại · KM/CK</th><th style="text-align:right;">Tổng tiền</th>'
+            . '<th>eVAT</th><th>TT</th><th>NV</th><th>Job</th><th>Thao tác</th></tr></thead><tbody>';
 
         if (!$orders) {
-            echo '<tr><td colspan="11">Chưa có phiếu bán (local_ledger type 10).</td></tr>';
+            echo '<tr><td colspan="9">Chưa có phiếu bán (local_ledger type 10).</td></tr>';
         } else {
             foreach ($orders as $o) {
                 $code = (string) ($o['local_ledger_code'] ?? '');
@@ -82,85 +92,145 @@ class TGS_Agent_Admin
                 $otype = TGS_Agent_Source::order_type_label($o);
                 $pd = TGS_Agent_Source::promo_discount_of($o);
 
-                echo '<tr>';
-                echo '<td><strong>' . esc_html($code) . '</strong></td>';
-                echo '<td>' . esc_html((string) ($o['created_at'] ?? '')) . '</td>';
-                echo '<td>' . esc_html(trim($cust . ' ' . $phone)) . '</td>';
-                echo '<td>' . esc_html($otype)
-                    . ($pd['z'] ? ' <small style="color:#8250df;">+Z</small>' : '') . '</td>';
-                echo '<td>' . esc_html(number_format((float) ($o['local_ledger_total_amount'] ?? 0))) . '</td>';
-                $kmck = array();
-                if ($pd['km']) { $kmck[] = '<span style="background:#daf1dd;color:#1a7f37;padding:1px 6px;border-radius:3px;">KM</span>'; }
-                if ($pd['ck']) { $kmck[] = '<span style="background:#fde8c8;color:#8a6116;padding:1px 6px;border-radius:3px;">CK ' . esc_html(number_format($pd['ck_amount'])) . '</span>'; }
-                echo '<td>' . ($kmck ? implode(' ', $kmck) : '—') . '</td>';
+                $lid = (int) ($o['local_ledger_id'] ?? 0);
+                $dates = '&from=' . rawurlencode($from) . '&to=' . rawurlencode($to);
 
-                // eVAT: trạng thái HIỆN TẠI + snapshot LÚC ĐẨY (payload job có khối vat chưa).
-                $ev_now  = TGS_Agent_Source::evat_current((int) ($o['local_ledger_id'] ?? 0));
+                echo '<tr>';
+                // Mã / Ngày
+                echo '<td><strong>' . esc_html($code) . '</strong><br>'
+                    . '<small>' . esc_html((string) ($o['created_at'] ?? '')) . '</small></td>';
+                // Khách
+                echo '<td>' . esc_html($cust)
+                    . ($phone !== '' ? '<br><small>' . esc_html($phone) . '</small>' : '') . '</td>';
+                // Loại đơn · KM/CK
+                $tags = array(self::pill($otype, '#eef', '#334'));
+                if ($pd['z'])  { $tags[] = self::pill('Z', '#efe4fb', '#8250df', 'Có phiếu tách KM (mã Z)'); }
+                if ($pd['km']) { $tags[] = self::pill('KM', '#daf1dd', '#1a7f37'); }
+                if ($pd['ck']) { $tags[] = self::pill('CK ' . number_format($pd['ck_amount']), '#fde8c8', '#8a6116'); }
+                echo '<td>' . implode(' ', $tags) . '</td>';
+                // Tổng tiền
+                echo '<td style="text-align:right;white-space:nowrap;">'
+                    . esc_html(number_format((float) ($o['local_ledger_total_amount'] ?? 0))) . '</td>';
+
+                // eVAT: hiện tại + lúc đẩy (gọn, chi tiết ở tooltip)
+                $ev_now  = TGS_Agent_Source::evat_current($lid);
                 $ev_push = TGS_Agent_Source::evat_at_push($code);
                 $st = $ev_now['state'];
                 if ($st === '') {
-                    $now_html = '<span style="color:#999;">Không có</span>';
+                    $now_pill = self::pill('–', '#eee', '#888', 'Chưa có eVAT');
                 } elseif ($ev_now['done']) {
-                    $now_html = '<span style="color:#1a7f37;">✔ ' . esc_html($ev_now['no']) . '</span>';
+                    $now_pill = self::pill('✔ ' . $ev_now['no'], '#daf1dd', '#1a7f37', 'Đã phát hành');
                 } elseif (in_array($st, array('pending', 'issued'), true)) {
-                    $now_html = '<span style="color:#8a6116;">Đang phát hành</span>';
+                    $now_pill = self::pill('…', '#fde8c8', '#8a6116', 'Đang phát hành (' . $st . ')');
                 } else {
-                    $now_html = '<span style="color:#b32d2e;">Lỗi: ' . esc_html($st) . '</span>';
+                    $now_pill = self::pill('✗', '#fde1e1', '#b32d2e', 'Lỗi phát hành: ' . $st);
                 }
                 if ($ev_push === null) {
-                    $push_html = '<span style="color:#999;">chưa tạo job</span>';
+                    $push_pill = self::pill('chưa job', '#eee', '#888', 'Chưa tạo job');
                 } elseif (!empty($ev_push['had'])) {
-                    $push_html = '<span style="color:#1a7f37;">✔ có'
-                        . ($ev_push['no'] !== '' ? ' ' . esc_html($ev_push['no']) : '') . '</span>';
+                    $push_pill = self::pill('✔', '#daf1dd', '#1a7f37',
+                        'Payload lúc đẩy CÓ eVAT' . ($ev_push['no'] !== '' ? ': ' . $ev_push['no'] : ''));
                 } else {
-                    $push_html = '<span style="color:#b32d2e;">chưa có</span>';
+                    $push_pill = self::pill('✗', '#fde1e1', '#b32d2e', 'Payload lúc đẩy CHƯA có eVAT');
                 }
-                echo '<td style="font-size:11px;line-height:1.5;">'
-                    . '<small>Hiện tại:</small> ' . $now_html . '<br>'
-                    . '<small>Lúc đẩy:</small> ' . $push_html . '</td>';
+                echo '<td style="white-space:nowrap;"><small>nay</small> ' . $now_pill
+                    . '<br><small>đẩy</small> ' . $push_pill . '</td>';
 
+                // TT phiếu
                 echo '<td>' . esc_html((string) ($o['local_ledger_status'] ?? '')) . '</td>';
+
+                // NV
                 $uid = (int) ($o['user_id'] ?? 0);
                 $uobj = $uid ? get_userdata($uid) : null;
                 $uname = $uobj ? $uobj->user_login : ('#' . $uid);
                 echo '<td>' . (!empty($nv['nvid'])
                     ? esc_html((string) ($nv['nv_code'] ?: $nv['nvid']))
-                    : '<span style="color:#b32d2e;">chưa nối NV</span><br><small>user: ' . esc_html($uname) . '</small>') . '</td>';
-                echo '<td>' . ($job ? '<span style="color:#1a7f37;">' . esc_html($job) . '</span>' : '—') . '</td>';
-                echo '<td>';
+                    : self::pill('chưa nối NV', '#fde1e1', '#b32d2e') . '<br><small>' . esc_html($uname) . '</small>') . '</td>';
+
+                // Job
+                echo '<td>' . ($job ? self::pill($job, '#daf1dd', '#1a7f37') : '—') . '</td>';
+
+                // Thao tác
+                echo '<td style="white-space:nowrap;">';
                 if ($job !== null) {
                     $del_url = wp_nonce_url(
-                        admin_url('admin-post.php?action=tgs_agent_delete_job&ledger_id=' . (int) ($o['local_ledger_id'] ?? 0)
-                            . '&from=' . rawurlencode($from) . '&to=' . rawurlencode($to)),
-                        'tgs_agent_delete_job_' . (int) ($o['local_ledger_id'] ?? 0)
+                        admin_url('admin-post.php?action=tgs_agent_delete_job&ledger_id=' . $lid . $dates),
+                        'tgs_agent_delete_job_' . $lid
                     );
-                    echo '<span class="description">đã có job</span> ';
-                    echo '<a class="button button-small" style="color:#b32d2e;border-color:#b32d2e;" href="'
-                        . esc_url($del_url) . '" onclick="return confirm(\'Xoá job khỏi queue cho đơn này?\');">Xoá queue</a>';
+                    echo '<a class="button button-small tgs-confirm" style="color:#b32d2e;border-color:#b32d2e;" href="'
+                        . esc_url($del_url) . '" data-confirm="Xoá job khỏi queue cho đơn ' . esc_attr($code) . '?"'
+                        . ' data-ok="Xoá queue">Xoá queue</a>';
                 } elseif ($can_queue) {
                     $url = wp_nonce_url(
-                        admin_url('admin-post.php?action=tgs_agent_queue_order&ledger_id=' . (int) ($o['local_ledger_id'] ?? 0)
-                            . '&from=' . rawurlencode($from) . '&to=' . rawurlencode($to)),
-                        'tgs_agent_queue_order_' . (int) ($o['local_ledger_id'] ?? 0)
+                        admin_url('admin-post.php?action=tgs_agent_queue_order&ledger_id=' . $lid . $dates),
+                        'tgs_agent_queue_order_' . $lid
                     );
-                    echo '<a class="button button-primary button-small" href="' . esc_url($url) . '">Thêm vào queue</a>';
+                    echo '<a class="button button-primary button-small" href="' . esc_url($url) . '">Thêm queue</a>';
                 } else {
-                    echo '<span class="description" style="color:#b32d2e;">thiếu chi nhánh/NV</span>';
+                    echo '<span class="description" style="color:#b32d2e;">thiếu CN/NV</span>';
                 }
-                // Nút ĐẨY LẠI CHỈ PHIẾU Z (độc lập với job phiếu gốc) — chỉ khi đơn có Z + đủ chi nhánh/NV.
+                // Đẩy lại RIÊNG phiếu Z — chỉ khi đơn có Z + đủ chi nhánh/NV.
                 if (!empty($pd['z']) && $site_srid && !empty($nv['nvid'])) {
                     $z_url = wp_nonce_url(
-                        admin_url('admin-post.php?action=tgs_agent_queue_bill_z&ledger_id=' . (int) ($o['local_ledger_id'] ?? 0)
-                            . '&from=' . rawurlencode($from) . '&to=' . rawurlencode($to)),
-                        'tgs_agent_queue_bill_z_' . (int) ($o['local_ledger_id'] ?? 0)
+                        admin_url('admin-post.php?action=tgs_agent_queue_bill_z&ledger_id=' . $lid . $dates),
+                        'tgs_agent_queue_bill_z_' . $lid
                     );
-                    echo '<br><a class="button button-small" style="margin-top:4px;color:#8250df;border-color:#8250df;" href="'
-                        . esc_url($z_url) . '" onclick="return confirm(\'Đẩy lại RIÊNG phiếu Z (tách KM) của đơn này?\');">Đẩy lại mã Z</a>';
+                    echo '<br><a class="button button-small tgs-confirm" style="margin-top:3px;color:#8250df;border-color:#8250df;" href="'
+                        . esc_url($z_url) . '" data-confirm="Đẩy lại RIÊNG phiếu Z (tách KM) của đơn ' . esc_attr($code) . '?'
+                        . ' Nếu phiếu Z đã tạo trước đó, HTsoft sẽ có hoá đơn Z TRÙNG."'
+                        . ' data-ok="Đẩy lại Z">Đẩy lại Z</a>';
                 }
                 echo '</td></tr>';
             }
         }
-        echo '</tbody></table></div>';
+        echo '</tbody></table>';
+        self::render_confirm_modal();
+        echo '</div>';
+    }
+
+    /** Modal xác nhận dùng chung cho các nút có class .tgs-confirm (data-confirm, data-ok). */
+    private static function render_confirm_modal()
+    {
+        ?>
+        <div id="tgs-confirm-overlay" style="display:none;position:fixed;inset:0;z-index:100000;
+            background:rgba(0,0,0,.5);">
+          <div role="dialog" aria-modal="true" aria-labelledby="tgs-confirm-msg" style="max-width:420px;
+              margin:12% auto;background:#fff;border-radius:6px;box-shadow:0 8px 30px rgba(0,0,0,.3);
+              padding:20px 22px;">
+            <h2 style="margin:0 0 10px;font-size:16px;">Xác nhận</h2>
+            <p id="tgs-confirm-msg" style="margin:0 0 18px;line-height:1.5;"></p>
+            <div style="text-align:right;">
+              <button type="button" class="button" id="tgs-confirm-cancel">Huỷ</button>
+              <button type="button" class="button button-primary" id="tgs-confirm-ok">Đồng ý</button>
+            </div>
+          </div>
+        </div>
+        <script>
+        (function () {
+            var overlay = document.getElementById('tgs-confirm-overlay');
+            var msgEl   = document.getElementById('tgs-confirm-msg');
+            var okBtn   = document.getElementById('tgs-confirm-ok');
+            var cancel  = document.getElementById('tgs-confirm-cancel');
+            var pending = null;
+            function close() { overlay.style.display = 'none'; pending = null; }
+            document.addEventListener('click', function (e) {
+                var a = e.target.closest ? e.target.closest('a.tgs-confirm') : null;
+                if (!a) { return; }
+                e.preventDefault();
+                pending = a.getAttribute('href');
+                msgEl.textContent = a.getAttribute('data-confirm') || 'Bạn có chắc không?';
+                okBtn.textContent = a.getAttribute('data-ok') || 'Đồng ý';
+                overlay.style.display = 'block';
+            });
+            okBtn.addEventListener('click', function () { if (pending) { window.location.href = pending; } });
+            cancel.addEventListener('click', close);
+            overlay.addEventListener('click', function (e) { if (e.target === overlay) { close(); } });
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape' && overlay.style.display === 'block') { close(); }
+            });
+        })();
+        </script>
+        <?php
     }
 
     public static function handle_delete_job()
